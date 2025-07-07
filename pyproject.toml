@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "carla-mcp"
+version = "0.2.0"
+description = "MCP server for comprehensive Carla audio plugin host control"
+authors = ["Michael Biehl"]
+readme = "README.md"
+packages = [{include = "carla_mcp", from = "source/frontend"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastmcp = ">=2.10.0"
+python-osc = ">=1.7.1"
+pyqt5 = "^5.15.11"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0.0"
+black = ">=22.0.0"
+flake8 = ">=4.0.0"
+
+[tool.poetry.scripts]
+start = "source.frontend.carla_mcp.main:main"
+carla-mcp = "source.frontend.carla_mcp.main:main"
+carla = "carla_runner:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

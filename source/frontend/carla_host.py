@@ -268,6 +268,25 @@ class HostWindow(QMainWindow):
         self.fWithCanvas = withCanvas
 
         # ----------------------------------------------------------------------------------------------------
+        # Internal stuff (MCP server)
+
+        self.fMcpServer = None
+        self.fMcpServerEnabled = False
+        
+        # Try to initialize MCP server
+        self.fMcpImportError = None
+        import sys
+        print("🔍 DEBUG: Attempting to import MCP server module...", file=sys.stderr)
+        try:
+            from carla_mcp import start_mcp_server, stop_mcp_server, is_mcp_server_running
+            self.fMcpServerEnabled = True
+            print("✅ MCP server module imported successfully", file=sys.stderr)
+        except ImportError as e:
+            print(f"❌ Failed to import MCP server module: {e}", file=sys.stderr)
+            self.fMcpImportError = str(e)
+            pass
+
+        # ----------------------------------------------------------------------------------------------------
         # Internal stuff (logs)
 
         self.autoscrollOnNewLog = True
@@ -691,6 +710,9 @@ class HostWindow(QMainWindow):
 
         if not host.isControl:
             QTimer.singleShot(0, self.slot_engineStart)
+            
+        # Log MCP initialization status
+        QTimer.singleShot(1000, self.slot_logMcpStatus)
 
     # --------------------------------------------------------------------------------------------------------
     # Manage visibility state, needed for NSM
@@ -974,12 +996,26 @@ class HostWindow(QMainWindow):
         self.ui.text_logs.appendPlainText("======= Starting engine =======")
 
         if self.host.engine_init(audioDriver, self.fClientName):
+            import sys
+            print("🔍 DEBUG: Engine init successful, checking MCP...", file=sys.stderr)
             if firstInit and not (self.host.isControl or self.host.isPlugin):
                 settings = QSafeSettings()
                 lastBpm  = settings.value("LastBPM", 120.0, float)
                 del settings
                 if lastBpm >= 20.0:
                     self.host.transport_bpm(lastBpm)
+            
+            # Start MCP server after engine is initialized
+            print(f"🔍 DEBUG: MCP enabled={self.fMcpServerEnabled}, error={self.fMcpImportError}", file=sys.stderr)
+            if self.fMcpServerEnabled:
+                print("🚀 Starting MCP server...", file=sys.stderr)
+                self.slot_startMcpServer()
+            else:
+                if self.fMcpImportError:
+                    print(f"❌ MCP server import failed: {self.fMcpImportError}", file=sys.stderr)
+                else:
+                    print("❌ MCP server module not found", file=sys.stderr)
+            
             return
 
         elif firstInit:
@@ -1063,6 +1099,10 @@ class HostWindow(QMainWindow):
         return True
 
     def engineStopFinal(self):
+        # Stop MCP server before engine shutdown
+        if self.fMcpServerEnabled:
+            self.slot_stopMcpServer()
+        
         patchcanvas.handleAllPluginsRemoved()
         self.killTimers()
 
@@ -2734,6 +2774,53 @@ class HostWindow(QMainWindow):
         print("Got SIGTERM -> Closing now")
         self.fCustomStopAction = self.CUSTOM_ACTION_APP_CLOSE
         self.close()
+
+    # --------------------------------------------------------------------------------------------------------
+    # MCP Server integration
+
+    def slot_startMcpServer(self):
+        """Start the MCP server"""
+        if not self.fMcpServerEnabled or self.fMcpServer is not None:
+            return
+        
+        try:
+            from carla_mcp import start_mcp_server
+            success = start_mcp_server(self.host)
+            if success:
+                self.fMcpServer = True
+                import sys
+                print("✅ MCP server started successfully", file=sys.stderr)
+            else:
+                import sys
+                print("❌ Failed to start MCP server", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"❌ Error starting MCP server: {e}", file=sys.stderr)
+
+    def slot_stopMcpServer(self):
+        """Stop the MCP server"""
+        if not self.fMcpServerEnabled or self.fMcpServer is None:
+            return
+        
+        try:
+            from carla_mcp import stop_mcp_server
+            stop_mcp_server()
+            self.fMcpServer = None
+            import sys
+            print("🛑 MCP server stopped", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"❌ Error stopping MCP server: {e}", file=sys.stderr)
+    
+    def slot_logMcpStatus(self):
+        """Log MCP server initialization status"""
+        if self.fMcpServerEnabled:
+            self.ui.text_logs.appendPlainText("✅ MCP server module imported successfully")
+        else:
+            if self.fMcpImportError:
+                self.ui.text_logs.appendPlainText(f"❌ Failed to import MCP server module: {self.fMcpImportError}")
+            else:
+                self.ui.text_logs.appendPlainText("❌ MCP server module not found")
 
     # --------------------------------------------------------------------------------------------------------
     # Internal stuff
