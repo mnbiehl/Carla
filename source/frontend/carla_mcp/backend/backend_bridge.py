@@ -495,14 +495,14 @@ class CarlaBackendBridge:
             Current engine process mode or -1 on error
         """
         try:
-            # Try to get from engine info first
-            info = self.get_engine_info()
-            if info and 'process_mode' in info:
-                return info['process_mode']
-            
-            # Fallback: assume rack mode if can't determine
-            self.logger.warning("Could not determine engine process mode, assuming rack mode")
-            return 2  # ENGINE_PROCESS_MODE_CONTINUOUS_RACK
+            # Get process mode directly from host object
+            if hasattr(self.host, 'processMode'):
+                mode = self.host.processMode
+                self.logger.info(f"Engine process mode: {mode}")
+                return mode
+            else:
+                self.logger.warning("Host object doesn't have processMode attribute")
+                return -1
         except Exception as e:
             self.logger.error(f"Error getting engine process mode: {e}")
             return -1
