@@ -713,6 +713,11 @@ class HostWindow(QMainWindow):
             
         # Log MCP initialization status
         QTimer.singleShot(1000, self.slot_logMcpStatus)
+        
+        # Start MCP server at application startup (independent of engine)
+        if self.fMcpServerEnabled:
+            print("🚀 Starting MCP server at application startup...", file=sys.stderr)
+            QTimer.singleShot(100, self.slot_startMcpServer)
 
     # --------------------------------------------------------------------------------------------------------
     # Manage visibility state, needed for NSM
@@ -1005,16 +1010,7 @@ class HostWindow(QMainWindow):
                 if lastBpm >= 20.0:
                     self.host.transport_bpm(lastBpm)
             
-            # Start MCP server after engine is initialized
-            print(f"🔍 DEBUG: MCP enabled={self.fMcpServerEnabled}, error={self.fMcpImportError}", file=sys.stderr)
-            if self.fMcpServerEnabled:
-                print("🚀 Starting MCP server...", file=sys.stderr)
-                self.slot_startMcpServer()
-            else:
-                if self.fMcpImportError:
-                    print(f"❌ MCP server import failed: {self.fMcpImportError}", file=sys.stderr)
-                else:
-                    print("❌ MCP server module not found", file=sys.stderr)
+            # MCP server is now started at application startup, not tied to engine
             
             return
 
@@ -1099,10 +1095,7 @@ class HostWindow(QMainWindow):
         return True
 
     def engineStopFinal(self):
-        # Stop MCP server before engine shutdown
-        if self.fMcpServerEnabled:
-            self.slot_stopMcpServer()
-        
+        # MCP server stays running - it's independent of engine lifecycle
         patchcanvas.handleAllPluginsRemoved()
         self.killTimers()
 
@@ -3140,6 +3133,11 @@ class HostWindow(QMainWindow):
 
         self.killTimers()
         self.saveSettings()
+        
+        # Stop MCP server on application close (not engine stop)
+        if self.fMcpServerEnabled:
+            print("🛑 Stopping MCP server on application close...", file=sys.stderr)
+            self.slot_stopMcpServer()
 
         if self.host.is_engine_running() and not (self.host.isControl or self.host.isPlugin):
             if not self.slot_engineStop(True):

@@ -20,7 +20,7 @@ flake8 = ">=4.0.0"
 [tool.poetry.scripts]
 start = "source.frontend.carla_mcp.main:main"
 carla-mcp = "source.frontend.carla_mcp.main:main"
-carla = "carla_runner:main"
+carla = "carla_launcher:main"
 
 [build-system]
 requires = ["poetry-core"]

@@ -29,6 +29,7 @@ class CarlaBackendBridge:
         self.host = host_instance
         self.logger = logging.getLogger(__name__)
         self._error_handler = get_error_handler()
+        self._cleanup_performed = False
         
     # --------------------------------------------------------------------------------------------------------
     # Connection & Engine Status
@@ -36,6 +37,8 @@ class CarlaBackendBridge:
     def is_engine_running(self) -> bool:
         """Check if Carla engine is running"""
         try:
+            if self._cleanup_performed:
+                return False
             return self.host.is_engine_running()
         except Exception as e:
             self.logger.error(f"Error checking engine status: {e}")
@@ -71,7 +74,7 @@ class CarlaBackendBridge:
     # --------------------------------------------------------------------------------------------------------
     # Plugin Management (mirroring GUI patterns)
     
-    def add_plugin_by_name(self, plugin_name: str) -> bool:
+    def add_plugin_by_name(self, plugin_name: str) -> tuple[bool, str]:
         """
         Add a plugin by name using plugin database metadata
         
@@ -79,7 +82,7 @@ class CarlaBackendBridge:
             plugin_name: Name of the plugin to add
             
         Returns:
-            True if plugin was added successfully, False otherwise
+            Tuple of (success, detailed_message)
         """
         # Import plugin discoverer to access database
         try:
@@ -97,8 +100,9 @@ class CarlaBackendBridge:
                     exact_matches.append(result)
             
             if not exact_matches:
-                self.logger.error(f"Plugin '{plugin_name}' not found in database")
-                return False
+                error_msg = f"Plugin '{plugin_name}' not found in database"
+                self.logger.error(error_msg)
+                return False, error_msg
             elif len(exact_matches) > 1:
                 # Multiple matches found - prefer LV2, then LADSPA, then others
                 plugin_priority = {'lv2': 0, 'ladspa': 1, 'vst2': 2, 'vst3': 3}
@@ -110,16 +114,17 @@ class CarlaBackendBridge:
                 plugin_info = exact_matches[0].to_dict()
             
             # Use the discovered plugin info to add with correct metadata
-            success = self._add_plugin_from_database(plugin_info)
+            success, details = self._add_plugin_from_database(plugin_info)
             if not success:
                 self.logger.error(f"Failed to add plugin '{plugin_name}' using database metadata")
-            return success
+            return success, details
             
         except Exception as e:
-            self.logger.error(f"Error adding plugin by name '{plugin_name}': {e}")
-            return False
+            error_msg = f"Error adding plugin by name '{plugin_name}': {e}"
+            self.logger.error(error_msg)
+            return False, error_msg
 
-    def _add_plugin_from_database(self, plugin_info) -> bool:
+    def _add_plugin_from_database(self, plugin_info) -> tuple[bool, str]:
         """
         Add plugin using database metadata (mimics GUI PluginListDialogResults)
         
@@ -127,12 +132,30 @@ class CarlaBackendBridge:
             plugin_info: Plugin info dict from database
             
         Returns:
-            True if plugin was added successfully
+            Tuple of (success, detailed_message)
         """
         try:
-            # Use GUI-compatible fields from database (same as carla_host.py)
-            filename = plugin_info.get('filename', '')  # GUI uses 'filename' field 
+            plugin_type_str = plugin_info.get('plugin_type', '').lower()
             label = plugin_info.get('label', '')
+            
+            # Extract the correct filename and label based on plugin type
+            if plugin_type_str == 'lv2':
+                # For LV2, filename should be empty and label should contain the URI
+                filename = ""  # LV2 plugins use empty filename
+                if '/' in label:
+                    # Extract URI from label (format: "Bundle.lv2/uri:scheme:here")
+                    uri = label.split('/', 1)[1]  # Get the URI part after the /
+                    label = uri  # Use the URI as the label
+                    self.logger.info(f"LV2 plugin: using empty filename and URI as label: '{label}'")
+                else:
+                    self.logger.warning(f"LV2 plugin label doesn't contain URI separator: '{label}'")
+            else:
+                # For other types, use the file path as filename
+                filename = plugin_info.get('filename', plugin_info.get('plugin_path', ''))
+                self.logger.info(f"{plugin_type_str.upper()} plugin: using path '{filename}' and label '{label}'")
+            
+            # No need to clean label - we already set it correctly above
+            
             unique_id = plugin_info.get('uniqueId', 0) or 0  # GUI uses 'uniqueId'
             build_type = plugin_info.get('build')
             plugin_type = plugin_info.get('type')  # GUI uses 'type' field (integer)
@@ -161,8 +184,9 @@ class CarlaBackendBridge:
             )
             
             if success:
-                self.logger.info(f"Successfully added plugin: {plugin_info.get('name')} (build={build_type}, type={plugin_type})")
-                return True
+                msg = f"Successfully added plugin: {plugin_info.get('name')} (build={build_type}, type={plugin_type})"
+                self.logger.info(msg)
+                return True, msg
             else:
                 # Get detailed error from Carla backend
                 last_error = "Unknown error"
@@ -171,12 +195,28 @@ class CarlaBackendBridge:
                 except Exception as e:
                     last_error = f"Could not get error details: {e}"
                 
-                self.logger.error(f"Failed to add plugin: {plugin_info.get('name')} - Carla error: {last_error}")
-                return False
+                # Build detailed error message
+                error_details = [
+                    f"Failed to add plugin: {plugin_info.get('name')}",
+                    f"Plugin type: {plugin_type_str} (int: {plugin_type})",
+                    f"Filename: {filename}",
+                    f"Label: {label}",  
+                    f"Build type: {build_type}",
+                    f"Carla error: {last_error}"
+                ]
+                
+                error_msg = "\n".join(error_details)
+                
+                # Log to console
+                for line in error_details:
+                    self.logger.error(f"  - {line}")
+                    
+                return False, error_msg
                 
         except Exception as e:
-            self.logger.error(f"Error in _add_plugin_from_database: {e}")
-            return False
+            error_msg = f"Error in _add_plugin_from_database: {e}\nPlugin info: {plugin_info}"
+            self.logger.error(error_msg)
+            return False, error_msg
 
     def add_plugin(self, plugin_type: str, filename: str, name: str = "", 
                    label: str = "", unique_id: int = 0) -> bool:
@@ -418,3 +458,192 @@ class CarlaBackendBridge:
         except Exception as e:
             self.logger.error(f"Error setting plugin {plugin_id} volume: {e}")
             return False
+    
+    # --------------------------------------------------------------------------------------------------------
+    # Engine Mode and Patchbay Control
+    
+    def set_engine_process_mode(self, mode: int) -> bool:
+        """
+        Switch between rack (2) and patchbay (3) modes
+        
+        Args:
+            mode: Engine process mode (2=rack, 3=patchbay)
+            
+        Returns:
+            True if mode was changed successfully
+        """
+        try:
+            # Engine option constants from carla_backend.py
+            ENGINE_OPTION_PROCESS_MODE = 1
+            
+            success = self.host.set_engine_option(ENGINE_OPTION_PROCESS_MODE, mode, "")
+            if success:
+                self.logger.info(f"Successfully set engine process mode to {mode}")
+                return True
+            else:
+                self.logger.error(f"Failed to set engine process mode to {mode}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error setting engine process mode to {mode}: {e}")
+            return False
+    
+    def get_engine_process_mode(self) -> int:
+        """
+        Get current engine mode (2=rack, 3=patchbay)
+        
+        Returns:
+            Current engine process mode or -1 on error
+        """
+        try:
+            # Try to get from engine info first
+            info = self.get_engine_info()
+            if info and 'process_mode' in info:
+                return info['process_mode']
+            
+            # Fallback: assume rack mode if can't determine
+            self.logger.warning("Could not determine engine process mode, assuming rack mode")
+            return 2  # ENGINE_PROCESS_MODE_CONTINUOUS_RACK
+        except Exception as e:
+            self.logger.error(f"Error getting engine process mode: {e}")
+            return -1
+    
+    def patchbay_connect(self, group_a: int, port_a: int, group_b: int, port_b: int) -> bool:
+        """
+        Connect two ports in patchbay mode
+        
+        Args:
+            group_a: Source port group ID
+            port_a: Source port ID within group
+            group_b: Destination port group ID  
+            port_b: Destination port ID within group
+            
+        Returns:
+            True if connection was successful
+        """
+        try:
+            success = self.host.patchbay_connect(False, group_a, port_a, group_b, port_b)
+            if success:
+                self.logger.info(f"Successfully connected ports: {group_a}:{port_a} -> {group_b}:{port_b}")
+                return True
+            else:
+                self.logger.error(f"Failed to connect ports: {group_a}:{port_a} -> {group_b}:{port_b}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error connecting ports {group_a}:{port_a} -> {group_b}:{port_b}: {e}")
+            return False
+    
+    def patchbay_disconnect(self, connection_id: int) -> bool:
+        """
+        Disconnect ports by connection ID
+        
+        Args:
+            connection_id: ID of the connection to disconnect
+            
+        Returns:
+            True if disconnection was successful
+        """
+        try:
+            success = self.host.patchbay_disconnect(False, connection_id)
+            if success:
+                self.logger.info(f"Successfully disconnected connection {connection_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to disconnect connection {connection_id}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error disconnecting connection {connection_id}: {e}")
+            return False
+    
+    def patchbay_refresh(self) -> bool:
+        """
+        Refresh patchbay state
+        
+        Returns:
+            True if refresh was successful
+        """
+        try:
+            success = self.host.patchbay_refresh(False)
+            if success:
+                self.logger.info("Successfully refreshed patchbay")
+                return True
+            else:
+                self.logger.error("Failed to refresh patchbay")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error refreshing patchbay: {e}")
+            return False
+    
+    def get_patchbay_groups(self) -> List[Dict]:
+        """
+        Get all available port groups (plugins, system, etc.)
+        
+        Returns:
+            List of dictionaries containing group information
+        """
+        try:
+            groups = []
+            
+            # Get current plugin count to iterate through plugin groups
+            plugin_count = self.get_plugin_count()
+            
+            # Add system audio group (always group 0 in patchbay mode)
+            groups.append({
+                'id': 0,
+                'name': 'System',
+                'type': 'system',
+                'port_count': 2  # Assume stereo system ports
+            })
+            
+            # Add plugin groups (each plugin gets its own group)
+            for i in range(plugin_count):
+                plugin_info = self.get_plugin_info(i)
+                if plugin_info:
+                    groups.append({
+                        'id': i + 1,  # Plugin groups start at 1
+                        'name': plugin_info.get('name', f'Plugin {i}'),
+                        'type': 'plugin',
+                        'plugin_id': i,
+                        'port_count': 2  # Assume stereo for now
+                    })
+            
+            return groups
+        except Exception as e:
+            self.logger.error(f"Error getting patchbay groups: {e}")
+            return []
+    
+    # --------------------------------------------------------------------------------------------------------
+    # Resource Management and Cleanup
+    
+    def cleanup(self):
+        """
+        Clean up resources and prepare for shutdown
+        
+        This method should be called before the bridge is destroyed
+        to ensure proper cleanup of any resources or connections.
+        """
+        if self._cleanup_performed:
+            return
+        
+        try:
+            self.logger.info("Cleaning up CarlaBackendBridge resources...")
+            
+            # Validate engine state before attempting cleanup
+            if self.host and hasattr(self.host, 'is_engine_running'):
+                if self.is_engine_running():
+                    self.logger.info("Engine is still running during cleanup - this is expected")
+                else:
+                    self.logger.info("Engine already stopped during cleanup")
+            
+            # Mark cleanup as performed
+            self._cleanup_performed = True
+            self.logger.info("CarlaBackendBridge cleanup completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during CarlaBackendBridge cleanup: {e}")
+            # Still mark as performed to prevent repeated attempts
+            self._cleanup_performed = True
+    
+    def __del__(self):
+        """Destructor to ensure cleanup is performed"""
+        if not self._cleanup_performed:
+            self.cleanup()

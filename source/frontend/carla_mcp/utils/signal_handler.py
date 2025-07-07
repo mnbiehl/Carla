@@ -7,7 +7,6 @@ Provides clean shutdown handling for the MCP server.
 import logging
 import signal
 import sys
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +45,14 @@ def shutdown_gracefully():
             pass  # Handle closed stdio
     
     logger.info("Server shutdown complete")
-    # Force immediate exit to avoid stdio issues
+    # Graceful shutdown - don't force exit, let parent handle cleanup
     try:
-        print("👋 Goodbye!")
+        print("👋 MCP server shutdown complete")
         sys.stdout.flush()
     except (ValueError, OSError):
         pass
-    os._exit(0)
+    # Don't call os._exit(0) - this can crash the parent process
+    # Let the parent Carla application handle the shutdown sequence
 
 
 # Expose shutdown event for external modules

@@ -23,6 +23,7 @@ from .utils.error_handler import init_error_handler
 mcp_server = None
 mcp_thread = None
 logger = None
+backend_bridge = None
 
 # Import tool registration functions
 from .tools.connection import register_connection_tools
@@ -222,6 +223,7 @@ def start_mcp_server(carla_host_instance=None):
         
         # Create single backend bridge for all tools and resources
         from .backend.backend_bridge import CarlaBackendBridge
+        global backend_bridge
         backend_bridge = CarlaBackendBridge(carla_host_instance)
         logger.info(f"Created backend bridge: {backend_bridge}")
         
@@ -249,18 +251,35 @@ def start_mcp_server(carla_host_instance=None):
 
 def stop_mcp_server():
     """Stop the MCP server"""
-    global mcp_server, logger
+    global mcp_server, mcp_thread, backend_bridge, logger
     
     if mcp_server:
         logger.info("Stopping MCP server...")
         try:
-            # Graceful shutdown
+            # Mark server as stopping
+            mcp_server._stopping = True
+            
+            # Clean up backend bridge first
+            if backend_bridge:
+                logger.info("Cleaning up backend bridge...")
+                backend_bridge.cleanup()
+            
+            # Wait for server thread to finish (with timeout)
+            if mcp_thread and mcp_thread.is_alive():
+                logger.info("Waiting for MCP server thread to finish...")
+                mcp_thread.join(timeout=5.0)  # 5 second timeout
+                if mcp_thread.is_alive():
+                    logger.warning("MCP server thread did not finish within timeout")
+            
+            # Graceful shutdown without forcing exit
             shutdown_gracefully()
             logger.info("MCP server stopped successfully")
         except Exception as e:
             logger.error(f"Error stopping MCP server: {e}")
     
     mcp_server = None
+    mcp_thread = None
+    backend_bridge = None
 
 
 def is_mcp_server_running():

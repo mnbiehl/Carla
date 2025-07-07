@@ -26,7 +26,7 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         Returns:
             JSON string with driver information
         """
-        if not backend_bridge or not CARLA_BACKEND_AVAILABLE:
+        if not backend_bridge:
             return "❌ Backend API not available. Driver info requires direct backend access."
         
         try:
@@ -61,11 +61,11 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         Returns:
             JSON string with engine information
         """
-        if not backend_bridge or not CARLA_BACKEND_AVAILABLE:
+        if not backend_bridge:
             return "❌ Backend API not available. Engine info requires direct backend access."
         
         try:
-            engine_info = backend_bridge.get_runtime_engine_info()
+            engine_info = backend_bridge.get_engine_info()
             
             if not engine_info:
                 return "❌ Engine not initialized or no info available"
@@ -88,16 +88,15 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             Status message
         """
         # Check prerequisites
-        prereq_error = check_prerequisites(backend_required=True, engine_required=False)
-        if prereq_error:
-            return prereq_error
+        if not backend_bridge:
+            return "❌ Backend API not available. Engine initialization requires direct backend access."
         
         handler = get_error_handler()
         
         def init_operation():
             success = backend_bridge.initialize_engine(driver_name, device_name)
             if success:
-                engine_info = backend_bridge.get_runtime_engine_info()
+                engine_info = backend_bridge.get_engine_info()
                 if engine_info:
                     details = (f"Device: {engine_info.get('device', 'default')}\n"
                               f"Sample Rate: {engine_info.get('sample_rate', 'unknown')}\n"
@@ -122,7 +121,7 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         Returns:
             Status message
         """
-        if not backend_bridge or not CARLA_BACKEND_AVAILABLE:
+        if not backend_bridge:
             return "❌ Backend API not available. Engine control requires direct backend access."
         
         try:
@@ -143,7 +142,7 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         Returns:
             JSON string with port information
         """
-        if not backend_bridge or not CARLA_BACKEND_AVAILABLE:
+        if not backend_bridge:
             return "❌ Backend API not available. Port info requires direct backend access."
         
         try:
@@ -186,3 +185,222 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             
         except Exception as e:
             return f"❌ Error getting port info for plugin {plugin_id}: {e}"
+    
+    # --------------------------------------------------------------------------------------------------------
+    # Patchbay Mode and Routing Tools
+    
+    @mcp.tool()
+    def switch_to_patchbay_mode() -> str:
+        """
+        Switch Carla from rack mode to patchbay mode
+        
+        Patchbay mode allows individual effects chains by exposing each plugin
+        as a separate port group that can be freely connected.
+        
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available. Mode switching requires direct backend access."
+        
+        try:
+            # Constants from carla_backend.py
+            ENGINE_PROCESS_MODE_PATCHBAY = 3
+            
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode == ENGINE_PROCESS_MODE_PATCHBAY:
+                return "✅ Already in patchbay mode"
+            
+            success = backend_bridge.set_engine_process_mode(ENGINE_PROCESS_MODE_PATCHBAY)
+            if success:
+                # Refresh patchbay after mode switch
+                backend_bridge.patchbay_refresh()
+                return "✅ Successfully switched to patchbay mode. Each plugin now has individual ports for flexible routing."
+            else:
+                return "❌ Failed to switch to patchbay mode. Engine may need to be restarted."
+                
+        except Exception as e:
+            return f"❌ Error switching to patchbay mode: {e}"
+    
+    @mcp.tool()
+    def switch_to_rack_mode() -> str:
+        """
+        Switch Carla back to rack mode
+        
+        Rack mode processes all plugins in series (Plugin1 → Plugin2 → Plugin3).
+        
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available. Mode switching requires direct backend access."
+        
+        try:
+            # Constants from carla_backend.py
+            ENGINE_PROCESS_MODE_CONTINUOUS_RACK = 2
+            
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK:
+                return "✅ Already in rack mode"
+            
+            success = backend_bridge.set_engine_process_mode(ENGINE_PROCESS_MODE_CONTINUOUS_RACK)
+            if success:
+                return "✅ Successfully switched to rack mode. All plugins now process in series."
+            else:
+                return "❌ Failed to switch to rack mode."
+                
+        except Exception as e:
+            return f"❌ Error switching to rack mode: {e}"
+    
+    @mcp.tool()
+    def get_current_engine_mode() -> str:
+        """
+        Get current engine mode (rack/patchbay)
+        
+        Returns:
+            Current engine mode description
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            mode = backend_bridge.get_engine_process_mode()
+            mode_names = {
+                2: "Rack Mode (series processing)",
+                3: "Patchbay Mode (flexible routing)", 
+                -1: "Unknown/Error"
+            }
+            
+            mode_name = mode_names.get(mode, f"Unknown mode ({mode})")
+            return f"🎛️ Current engine mode: {mode_name}"
+            
+        except Exception as e:
+            return f"❌ Error getting engine mode: {e}"
+    
+    @mcp.tool()
+    def get_patchbay_groups() -> str:
+        """
+        List all available port groups in patchbay mode
+        
+        Shows system audio ports, plugin groups, and external clients like loopers.
+        
+        Returns:
+            JSON string with group information
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            # Check if in patchbay mode
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
+                return "❌ Patchbay groups only available in patchbay mode. Use switch_to_patchbay_mode() first."
+            
+            groups = backend_bridge.get_patchbay_groups()
+            
+            result = {
+                'mode': 'patchbay',
+                'group_count': len(groups),
+                'groups': groups
+            }
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as e:
+            return f"❌ Error getting patchbay groups: {e}"
+    
+    @mcp.tool()
+    def connect_patchbay_ports(group_a_name: str, port_a_name: str, group_b_name: str, port_b_name: str) -> str:
+        """
+        Connect two ports in patchbay mode
+        
+        Args:
+            group_a_name: Source port group name (e.g., "System", "Delay Plugin")
+            port_a_name: Source port name (e.g., "output_1", "capture_1")
+            group_b_name: Destination port group name
+            port_b_name: Destination port name (e.g., "input_1", "playback_1")
+            
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            # Check if in patchbay mode
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
+                return "❌ Port connections only work in patchbay mode. Use switch_to_patchbay_mode() first."
+            
+            # Get available groups to find IDs
+            groups = backend_bridge.get_patchbay_groups()
+            
+            # Find group IDs by name
+            group_a_id = None
+            group_b_id = None
+            
+            for group in groups:
+                if group['name'].lower() == group_a_name.lower():
+                    group_a_id = group['id']
+                if group['name'].lower() == group_b_name.lower():
+                    group_b_id = group['id']
+            
+            if group_a_id is None:
+                return f"❌ Source group '{group_a_name}' not found. Available groups: {[g['name'] for g in groups]}"
+            
+            if group_b_id is None:
+                return f"❌ Destination group '{group_b_name}' not found. Available groups: {[g['name'] for g in groups]}"
+            
+            # For simplicity, assume stereo ports (0=left, 1=right)
+            # This could be enhanced to parse port names or provide port discovery
+            port_map = {
+                'output_1': 0, 'output_l': 0, 'left': 0, 'capture_1': 0,
+                'output_2': 1, 'output_r': 1, 'right': 1, 'capture_2': 1,
+                'input_1': 0, 'input_l': 0, 'playback_1': 0,
+                'input_2': 1, 'input_r': 1, 'playback_2': 1
+            }
+            
+            port_a_id = port_map.get(port_a_name.lower(), 0)
+            port_b_id = port_map.get(port_b_name.lower(), 0)
+            
+            success = backend_bridge.patchbay_connect(group_a_id, port_a_id, group_b_id, port_b_id)
+            if success:
+                return f"✅ Connected {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}"
+            else:
+                return f"❌ Failed to connect {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}"
+                
+        except Exception as e:
+            return f"❌ Error connecting ports: {e}"
+    
+    @mcp.tool()
+    def list_patchbay_connections() -> str:
+        """
+        Show all current patchbay connections
+        
+        Returns:
+            JSON string with connection information
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            # Check if in patchbay mode
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
+                return "❌ Patchbay connections only available in patchbay mode."
+            
+            # Note: This is a simplified implementation
+            # The Carla backend doesn't expose a direct "get_connections" method
+            # In a full implementation, this would need to track connections
+            # or parse them from the patchbay state
+            
+            result = {
+                'mode': 'patchbay',
+                'message': 'Connection listing not yet implemented. Use Carla GUI patchbay view for now.',
+                'suggestion': 'Check the Carla patchbay tab to see current connections visually.'
+            }
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as e:
+            return f"❌ Error listing connections: {e}"

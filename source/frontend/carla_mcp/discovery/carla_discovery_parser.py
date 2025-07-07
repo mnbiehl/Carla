@@ -72,8 +72,17 @@ class PluginInfo:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PluginInfo':
-        """Create from dictionary"""
-        return cls(**data)
+        """Create from dictionary, filtering out extra fields"""
+        import inspect
+        
+        # Get the valid field names from the dataclass
+        sig = inspect.signature(cls.__init__)
+        valid_fields = set(sig.parameters.keys()) - {'self'}
+        
+        # Filter the data to only include valid fields
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        
+        return cls(**filtered_data)
 
 
 class CarlaDiscoveryParser:

@@ -514,12 +514,12 @@ def register_plugin_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         
         try:
             # Use the new simplified backend method that handles all database lookup and metadata
-            success = backend_bridge.add_plugin_by_name(plugin_name)
+            success, details = backend_bridge.add_plugin_by_name(plugin_name)
             
             if success:
-                return f"Successfully added plugin: {plugin_name}"
+                return f"✅ {details}"
             else:
-                return f"Failed to add plugin: {plugin_name}"
+                return f"❌ {details}"
                 
         except Exception as e:
-            return f"Error adding plugin: {e}"
+            return f"❌ Error adding plugin: {e}"
