@@ -1,8 +1,24 @@
-# Carla MCP Server - Development TODO
+# Carla MCP Development TODO
 
-## 🎉 Major Milestone: Plugin Loading System WORKING!
+## ✅ Session 1 Completed - Major Stability Fixes
 
-As of 2025-07-07, we have successfully implemented a functional MCP server that can load LV2, LADSPA, VST2, and VST3 plugins into Carla!
+### Session 1 Achievements (2025-07-07)
+- [x] **Fixed MCP server crashes** - Decoupled from engine lifecycle to prevent Wayland crashes
+- [x] **Resolved LV2 plugin loading** - Fixed URI handling for proper plugin instantiation
+- [x] **Fixed database schema** - Plugin cache corruption resolved
+- [x] **Improved error handling** - MCP tools now return detailed debug information
+- [x] **Fixed engine mode detection** - Properly detects rack/patchbay modes
+- [x] **Added resource cleanup** - Proper shutdown sequence prevents memory leaks
+
+## ✅ Session 2 Completed - Patchbay & Multi-Channel Investigation
+
+### Session 2 Achievements (2025-07-08)
+- [x] **Implemented proper patchbay port connections** - Fixed port offset constants (255 for inputs, 510 for outputs)
+- [x] **Added JACK application support** - New `add_jack_application` tool for external JACK clients
+- [x] **Discovered multi-channel patchbay plugins** - Found Carla-Patchbay (16chan/32chan/64chan) internal plugins
+- [x] **Enabled debug logging** - Built Carla with DEBUG=true and CARLA_CAPTURE_CONSOLE_OUTPUT for comprehensive logging
+- [x] **Fixed patchbay group enumeration** - Updated to show actual plugin port counts
+- [x] **Investigated multi-channel audio solutions** - Analyzed approaches for expanding beyond 2 system ports
 
 ## 🛣️ Journey Summary
 
@@ -88,10 +104,16 @@ Carla MCP Server
 ## 🔧 Current Issues
 
 ### Known Problems
-1. **`add_plugin_by_name` Still Fails**: Direct `add_plugin` works, but the convenience function needs label format debugging
-2. **Internal Plugins Not Supported**: Built-in Carla plugins not discoverable through standard API
-3. **Plugin Parameter Control**: Basic framework exists but needs testing
-4. **MIDI Control**: Framework exists but needs comprehensive testing
+1. **JACK Application Launch Failures**: External JACK apps (like loopers) fail due to missing symbols in Carla's bundled JACK library
+2. **Multi-channel Patchbay Plugins**: Internal patchbay plugins don't expose ports to external JACK graph
+3. **GUI Crashes During Discovery**: Plugin browser occasionally crashes during scan (backend continues working)
+4. **Limited External I/O**: Carla hardcoded to 2 audio inputs/outputs for external JACK connectivity
+
+### Session 2 Discoveries
+1. **Port Offset Constants**: Audio ports require specific offsets (255 for inputs, 510 for outputs) - now fixed
+2. **Internal Plugin Architecture**: Multi-channel patchbay plugins work internally but don't provide external JACK ports
+3. **JACK Library Conflicts**: Carla's bundled JACK library missing functions needed by external applications
+4. **Debug Logging**: Comprehensive logging now available via debug build and environment variables
 
 ### Architecture Issues
 1. **Constants Duplication**: Plugin type constants defined in multiple places (violates DRY principle)
@@ -100,11 +122,16 @@ Carla MCP Server
 
 ## 📋 HIGH PRIORITY TODO
 
-### Immediate Fixes Needed
-- [ ] **Fix `add_plugin_by_name`**: Debug label format issues preventing database-driven plugin addition
+### Multi-Channel Audio Solutions
+- [ ] **Fix JACK Application Launch**: Resolve bundled JACK library conflicts preventing external JACK clients
+- [ ] **Multiple Carla Instances**: Implement MCP tools to spawn and coordinate multiple Carla instances for multi-channel setups
+- [ ] **Modify Carla for Configurable I/O**: C++ changes to make system audio port count configurable (long-term solution)
+- [ ] **Alternative JACK Routing**: Investigate external tools (alsa_in/alsa_out) for additional I/O channels
+
+### Core Functionality
 - [ ] **Test Parameter Control**: Verify plugin parameter get/set functionality works
 - [ ] **Test MIDI Functionality**: Ensure note on/off and control messages work
-- [ ] **Add Internal Plugin Support**: Research how to expose Carla's built-in plugins
+- [ ] **Fix GUI Crashes**: Investigate plugin discovery crashes and improve robustness
 
 ### Code Quality Improvements
 - [ ] **Eliminate Constants Duplication**: Import plugin type constants directly from `carla_backend.py` instead of redefining

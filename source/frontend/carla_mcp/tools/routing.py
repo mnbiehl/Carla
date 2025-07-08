@@ -278,6 +278,35 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             return f"❌ Error getting engine mode: {e}"
     
     @mcp.tool()
+    def refresh_patchbay() -> str:
+        """
+        Refresh patchbay connections and state
+        
+        This is typically only needed in special circumstances like:
+        - After external changes to the patchbay
+        - To resync if connections appear out of sync
+        
+        NOT needed after:
+        - Adding/removing plugins (automatic)
+        - Making connections (automatic)
+        - Normal patchbay operations
+        
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            success = backend_bridge.patchbay_refresh()
+            if success:
+                return "✅ Patchbay refreshed successfully"
+            else:
+                return "❌ Failed to refresh patchbay"
+        except Exception as e:
+            return f"❌ Error refreshing patchbay: {e}"
+    
+    @mcp.tool()
     def get_patchbay_groups() -> str:
         """
         List all available port groups in patchbay mode
@@ -351,17 +380,43 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             if group_b_id is None:
                 return f"❌ Destination group '{group_b_name}' not found. Available groups: {[g['name'] for g in groups]}"
             
-            # For simplicity, assume stereo ports (0=left, 1=right)
-            # This could be enhanced to parse port names or provide port discovery
-            port_map = {
-                'output_1': 0, 'output_l': 0, 'left': 0, 'capture_1': 0,
-                'output_2': 1, 'output_r': 1, 'right': 1, 'capture_2': 1,
-                'input_1': 0, 'input_l': 0, 'playback_1': 0,
-                'input_2': 1, 'input_r': 1, 'playback_2': 1
-            }
+            # Port offset constants from Carla backend
+            # Audio ports need proper offsets:
+            # - Audio inputs: 255 + port_index
+            # - Audio outputs: 510 + port_index
+            kAudioInputPortOffset = 255
+            kAudioOutputPortOffset = 510
             
-            port_a_id = port_map.get(port_a_name.lower(), 0)
-            port_b_id = port_map.get(port_b_name.lower(), 0)
+            # Parse port names and determine type/index
+            port_a_id = 0
+            port_b_id = 0
+            
+            # Common port naming patterns
+            if any(x in port_a_name.lower() for x in ['output', 'out', 'capture']):
+                # Source is output port
+                if '2' in port_a_name or 'r' in port_a_name.lower():
+                    port_a_id = kAudioOutputPortOffset + 1  # Right channel
+                else:
+                    port_a_id = kAudioOutputPortOffset + 0  # Left channel
+            elif any(x in port_a_name.lower() for x in ['input', 'in']):
+                # Source is input port (less common for sources)
+                if '2' in port_a_name or 'r' in port_a_name.lower():
+                    port_a_id = kAudioInputPortOffset + 1
+                else:
+                    port_a_id = kAudioInputPortOffset + 0
+            
+            if any(x in port_b_name.lower() for x in ['input', 'in', 'playback']):
+                # Destination is input port
+                if '2' in port_b_name or 'r' in port_b_name.lower():
+                    port_b_id = kAudioInputPortOffset + 1  # Right channel
+                else:
+                    port_b_id = kAudioInputPortOffset + 0  # Left channel
+            elif any(x in port_b_name.lower() for x in ['output', 'out']):
+                # Destination is output port (less common for destinations)
+                if '2' in port_b_name or 'r' in port_b_name.lower():
+                    port_b_id = kAudioOutputPortOffset + 1
+                else:
+                    port_b_id = kAudioOutputPortOffset + 0
             
             success = backend_bridge.patchbay_connect(group_a_id, port_a_id, group_b_id, port_b_id)
             if success:

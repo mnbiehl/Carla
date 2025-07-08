@@ -598,12 +598,31 @@ class CarlaBackendBridge:
             for i in range(plugin_count):
                 plugin_info = self.get_plugin_info(i)
                 if plugin_info:
+                    # Get actual port counts for this plugin
+                    audio_ins = 0
+                    audio_outs = 0
+                    
+                    try:
+                        audio_port_info = self.host.get_audio_port_count_info(i)
+                        if audio_port_info:
+                            audio_ins = audio_port_info.ins
+                            audio_outs = audio_port_info.outs
+                    except:
+                        # Default to stereo if can't get info
+                        audio_ins = 2
+                        audio_outs = 2
+                    
                     groups.append({
                         'id': i + 1,  # Plugin groups start at 1
                         'name': plugin_info.get('name', f'Plugin {i}'),
                         'type': 'plugin',
                         'plugin_id': i,
-                        'port_count': 2  # Assume stereo for now
+                        'audio_inputs': audio_ins,
+                        'audio_outputs': audio_outs,
+                        'ports': {
+                            'inputs': [f'input_{j+1}' for j in range(audio_ins)],
+                            'outputs': [f'output_{j+1}' for j in range(audio_outs)]
+                        }
                     })
             
             return groups

@@ -495,6 +495,56 @@ def register_plugin_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             return f"❌ Error refreshing cache: {e}"
     
     @mcp.tool()
+    def add_jack_application(command: str, name: str = "", arguments: str = "") -> str:
+        """
+        Add a JACK application as a plugin
+        
+        This allows running external JACK applications (like jack_mixer, jack_capture, etc.)
+        as plugins within Carla, giving you access to their ports in the patchbay.
+        
+        Args:
+            command: The command/executable to run (e.g., "jack_mixer", "/usr/bin/some_app")
+            name: Display name for the application (optional, defaults to command name)
+            arguments: Command line arguments to pass to the application
+            
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available. Cannot add JACK application."
+        
+        try:
+            # Use the command as the filename/path
+            # For JACK apps, the label is the full command with arguments
+            if arguments:
+                label = f"{command} {arguments}"
+            else:
+                label = command
+                
+            display_name = name or command.split('/')[-1]  # Use basename if no name provided
+            
+            success = backend_bridge.add_plugin(
+                plugin_type="jack",
+                filename=command,  # The executable path
+                name=display_name,
+                label=label        # Full command with args
+            )
+            
+            if success:
+                return f"✅ Successfully added JACK application: {display_name}"
+            else:
+                # Try to get error details
+                error_msg = "Unknown error"
+                try:
+                    error_msg = backend_bridge.host.get_last_error() or "No error details available"
+                except:
+                    pass
+                return f"❌ Failed to add JACK application: {error_msg}"
+                
+        except Exception as e:
+            return f"❌ Error adding JACK application: {e}"
+    
+    @mcp.tool()
     def add_plugin_by_name(plugin_name: str, plugin_type: Optional[str] = None) -> str:
         """
         Add a plugin to Carla by searching for it by name
