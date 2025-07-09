@@ -79,6 +79,7 @@ try:
         ENGINE_OPTION_AUDIO_DRIVER,
         ENGINE_OPTION_AUDIO_DEVICE,
         ENGINE_OPTION_OSC_ENABLED,
+        ENGINE_OPTION_CLIENT_NAME_PREFIX,
     )
     # Try to import newer constants that may not be available
     try:
@@ -159,6 +160,7 @@ except ImportError as e:
     ENGINE_OPTION_AUDIO_DRIVER = 13
     ENGINE_OPTION_AUDIO_DEVICE = 14
     ENGINE_OPTION_OSC_ENABLED = 15
+    ENGINE_OPTION_CLIENT_NAME_PREFIX = 34
 
 # Create mappings for easy lookup
 PLUGIN_TYPE_TO_STRING: Dict[int, str] = {
