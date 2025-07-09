@@ -9,6 +9,7 @@ import logging
 import subprocess
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
+from ..constants import PLUGIN_STRING_TO_TYPE, get_plugin_type_constant
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +42,13 @@ class PluginInfo:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
-        # Map plugin type strings to GUI constants (matching carla_backend.py)
-        PLUGIN_TYPE_MAP = {
-            "internal": 1, "ladspa": 2, "dssi": 3, "lv2": 4, "vst2": 5,
-            "vst3": 6, "au": 7, "sf2": 8, "sfz": 9, "jack": 12
-        }
-        
         return {
             'name': self.name,
             'maker': self.maker,
             'label': self.label,
             'category': self.category,
             'plugin_type': self.plugin_type,  # Keep original for MCP API
-            'type': PLUGIN_TYPE_MAP.get(self.plugin_type.lower(), 4),  # GUI-compatible integer (default to LV2=4)
+            'type': get_plugin_type_constant(self.plugin_type),  # GUI-compatible integer
             'filename': self.plugin_path,  # Always use bundle path for filename
             'plugin_path': self.plugin_path,
             'audio_ins': self.audio_ins,

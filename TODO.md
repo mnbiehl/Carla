@@ -134,7 +134,11 @@ Carla MCP Server
 - [ ] **Fix GUI Crashes**: Investigate plugin discovery crashes and improve robustness
 
 ### Code Quality Improvements
-- [ ] **Eliminate Constants Duplication**: Import plugin type constants directly from `carla_backend.py` instead of redefining
+- [x] **Eliminate Constants Duplication**: Created single source of truth in constants.py module
+  - Imported all constants from carla_backend.py
+  - Replaced hardcoded values in backend_bridge.py, carla_discovery_parser.py, and routing.py
+  - Added proper fallback values for missing constants
+  - Tested all imports and functionality
 - [ ] **Add Comprehensive Error Handling**: Better error messages and recovery suggestions
 - [ ] **Add Input Validation**: Validate plugin IDs, parameter ranges, etc.
 - [ ] **Add Unit Tests**: Test suite for backend bridge and discovery system

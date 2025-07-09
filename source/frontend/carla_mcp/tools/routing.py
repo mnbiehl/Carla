@@ -8,6 +8,10 @@ import json
 from fastmcp import FastMCP
 from ..backend.backend_bridge import CarlaBackendBridge
 from ..utils.error_handler import get_error_handler
+from ..constants import (
+    PATCHBAY_PORT_AUDIO_INPUT_OFFSET,
+    PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET
+)
 
 # Global backend bridge instance - will be initialized in main.py
 backend_bridge: CarlaBackendBridge = None
@@ -384,8 +388,6 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             # Audio ports need proper offsets:
             # - Audio inputs: 255 + port_index
             # - Audio outputs: 510 + port_index
-            kAudioInputPortOffset = 255
-            kAudioOutputPortOffset = 510
             
             # Parse port names and determine type/index
             port_a_id = 0
@@ -395,28 +397,28 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             if any(x in port_a_name.lower() for x in ['output', 'out', 'capture']):
                 # Source is output port
                 if '2' in port_a_name or 'r' in port_a_name.lower():
-                    port_a_id = kAudioOutputPortOffset + 1  # Right channel
+                    port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1  # Right channel
                 else:
-                    port_a_id = kAudioOutputPortOffset + 0  # Left channel
+                    port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0  # Left channel
             elif any(x in port_a_name.lower() for x in ['input', 'in']):
                 # Source is input port (less common for sources)
                 if '2' in port_a_name or 'r' in port_a_name.lower():
-                    port_a_id = kAudioInputPortOffset + 1
+                    port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
                 else:
-                    port_a_id = kAudioInputPortOffset + 0
+                    port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
             
             if any(x in port_b_name.lower() for x in ['input', 'in', 'playback']):
                 # Destination is input port
                 if '2' in port_b_name or 'r' in port_b_name.lower():
-                    port_b_id = kAudioInputPortOffset + 1  # Right channel
+                    port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1  # Right channel
                 else:
-                    port_b_id = kAudioInputPortOffset + 0  # Left channel
+                    port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0  # Left channel
             elif any(x in port_b_name.lower() for x in ['output', 'out']):
                 # Destination is output port (less common for destinations)
                 if '2' in port_b_name or 'r' in port_b_name.lower():
-                    port_b_id = kAudioOutputPortOffset + 1
+                    port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1
                 else:
-                    port_b_id = kAudioOutputPortOffset + 0
+                    port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0
             
             success = backend_bridge.patchbay_connect(group_a_id, port_a_id, group_b_id, port_b_id)
             if success:

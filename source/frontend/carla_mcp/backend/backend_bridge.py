@@ -9,6 +9,17 @@ backend access with the same capabilities as the native Carla interface.
 import logging
 from typing import Optional, Dict, Any, List
 from ..utils.error_handler import get_error_handler
+from ..constants import (
+    PLUGIN_STRING_TO_TYPE,
+    NATIVE_BINARY_TYPE,
+    PLUGIN_OPTIONS_NULL,
+    ENGINE_PROCESS_MODE_PATCHBAY,
+    ENGINE_PROCESS_MODE_CONTINUOUS_RACK,
+    ENGINE_OPTION_PROCESS_MODE,
+    get_plugin_type_constant,
+    BINARY_WIN64, BINARY_WIN32,
+    BINARY_POSIX64, BINARY_POSIX32
+)
 
 
 class CarlaBackendBridge:
@@ -166,12 +177,11 @@ class CarlaBackendBridge:
                 is_64bit = platform.machine() in ('x86_64', 'AMD64')
                 is_windows = platform.system() == 'Windows'
                 if is_windows:
-                    build_type = 4 if is_64bit else 3  # BINARY_WIN64 or BINARY_WIN32
+                    build_type = BINARY_WIN64 if is_64bit else BINARY_WIN32
                 else:
-                    build_type = 2 if is_64bit else 1  # BINARY_POSIX64 or BINARY_POSIX32
+                    build_type = BINARY_POSIX64 if is_64bit else BINARY_POSIX32
             
             # Call add_plugin with exact same parameters as GUI
-            PLUGIN_OPTIONS_NULL = 0x0
             success = self.host.add_plugin(
                 build_type,      # btype (from database or detected)
                 plugin_type,     # ptype 
@@ -239,57 +249,19 @@ class CarlaBackendBridge:
             return False
             
         try:
-            # Map plugin type string to Carla constants
-            # These MUST match carla_backend.py definitions exactly!
-            PLUGIN_TYPE_MAP = {
-                "internal": 1,  # PLUGIN_INTERNAL (was incorrectly 0)
-                "ladspa": 2,    # PLUGIN_LADSPA (was incorrectly 1)
-                "dssi": 3,      # PLUGIN_DSSI (was incorrectly 2)
-                "lv2": 4,       # PLUGIN_LV2 (was incorrectly 3)
-                "vst2": 5,      # PLUGIN_VST2 (was incorrectly 4)
-                "vst3": 6,      # PLUGIN_VST3 (was incorrectly 5)
-                "au": 7,        # PLUGIN_AU (was incorrectly 6)
-                "sf2": 8,       # PLUGIN_SF2 (was incorrectly 7)
-                "sfz": 9,       # PLUGIN_SFZ (was incorrectly 8)
-                "jack": 12      # PLUGIN_JACK (was incorrectly 7)
-            }
+            # Get plugin type constant from centralized constants module
+            ptype = get_plugin_type_constant(plugin_type)
             
-            ptype = PLUGIN_TYPE_MAP.get(plugin_type.lower(), 4)  # Default to LV2 (which is 4)
-            
-            # Import proper binary type constants from carla_backend
-            import sys
-            import platform
-            from pathlib import Path
-            
-            # Add Carla frontend to path to import binary constants
-            carla_frontend_path = Path(__file__).parent.parent.parent
-            if str(carla_frontend_path) not in sys.path:
-                sys.path.insert(0, str(carla_frontend_path))
-            
-            try:
-                from carla_backend import BINARY_NATIVE, BINARY_POSIX64
-                # Force use of correct binary type for Linux x86_64
-                if BINARY_NATIVE == 0:  # BINARY_NONE is wrong
-                    BINARY_NATIVE = BINARY_POSIX64
-                    self.logger.warning(f"Corrected BINARY_NATIVE from 0 to {BINARY_NATIVE} (BINARY_POSIX64)")
-                else:
-                    self.logger.info(f"Using BINARY_NATIVE = {BINARY_NATIVE}")
-            except ImportError:
-                # Fallback: manual platform detection
-                is_64bit = platform.machine() in ('x86_64', 'AMD64')
-                is_windows = platform.system() == 'Windows'
-                
-                if is_windows:
-                    BINARY_NATIVE = 4 if is_64bit else 3  # BINARY_WIN64 or BINARY_WIN32
-                else:
-                    BINARY_NATIVE = 2 if is_64bit else 1  # BINARY_POSIX64 or BINARY_POSIX32
-                
-                self.logger.warning(f"Failed to import carla_backend, using fallback BINARY_NATIVE = {BINARY_NATIVE}")
-            
-            PLUGIN_OPTIONS_NULL = 0x0
+            # For special plugin types, handle filename/label appropriately
+            if plugin_type.lower() == 'lv2':
+                # LV2 plugins: empty filename, URI as label
+                filename = ""  
+                if '/' in label:
+                    uri = label.split('/', 1)[1]  # Get URI part
+                    label = uri  # Use the URI as the label
             
             success = self.host.add_plugin(
-                BINARY_NATIVE, 
+                NATIVE_BINARY_TYPE, 
                 ptype, 
                 filename,  # Keep as string, let Carla handle encoding
                 name or None,
@@ -300,7 +272,7 @@ class CarlaBackendBridge:
             )
             
             if success:
-                self.logger.info(f"Successfully added plugin: {filename} (binary_type={BINARY_NATIVE}, plugin_type={ptype})")
+                self.logger.info(f"Successfully added plugin: {filename} (binary_type={NATIVE_BINARY_TYPE}, plugin_type={ptype})")
                 return True
             else:
                 # Get detailed error from Carla backend
@@ -310,7 +282,7 @@ class CarlaBackendBridge:
                 except Exception as e:
                     last_error = f"Could not get error details: {e}"
                 
-                self.logger.error(f"Failed to add plugin: {filename} (binary_type={BINARY_NATIVE}, plugin_type={ptype}, arch={platform.machine()}) - Carla error: {last_error}")
+                self.logger.error(f"Failed to add plugin: {filename} (binary_type={NATIVE_BINARY_TYPE}, plugin_type={ptype}) - Carla error: {last_error}")
                 return False
                 
         except Exception as e:
@@ -473,9 +445,6 @@ class CarlaBackendBridge:
             True if mode was changed successfully
         """
         try:
-            # Engine option constants from carla_backend.py
-            ENGINE_OPTION_PROCESS_MODE = 1
-            
             success = self.host.set_engine_option(ENGINE_OPTION_PROCESS_MODE, mode, "")
             if success:
                 self.logger.info(f"Successfully set engine process mode to {mode}")
