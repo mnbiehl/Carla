@@ -971,7 +971,7 @@ bool RackGraph::getGroupAndPortIdFromFullName(const char* const fullPortName, ui
     return extGraph.getGroupAndPortIdFromFullName(fullPortName, groupId, portId);
 }
 
-void RackGraph::process(CarlaEngine::ProtectedData* const data, const float* inBufReal[2], float* outBufReal[2], const uint32_t frames)
+void RackGraph::process(CarlaEngine::ProtectedData* const data, const float* inBufReal[], float* outBufReal[], const uint32_t frames, const uint32_t channels)
 {
     CARLA_SAFE_ASSERT_RETURN(data != nullptr,);
     CARLA_SAFE_ASSERT_RETURN(data->events.in != nullptr,);
@@ -982,13 +982,16 @@ void RackGraph::process(CarlaEngine::ProtectedData* const data, const float* inB
     float* const inBuf0   = audioBuffers.inBufTmp[0];
     float* const inBuf1   = audioBuffers.inBufTmp[1];
 
-    // initialize audio inputs
+    // initialize audio inputs (currently only processing first 2 channels)
     carla_copyFloats(inBuf0, inBufReal[0], frames);
     carla_copyFloats(inBuf1, inBufReal[1], frames);
 
-    // initialize audio outputs (zero)
-    carla_zeroFloats(outBufReal[0], frames);
-    carla_zeroFloats(outBufReal[1], frames);
+    // initialize audio outputs (zero all channels)
+    for (uint32_t i = 0; i < channels; ++i)
+    {
+        if (outBufReal[i] != nullptr)
+            carla_zeroFloats(outBufReal[i], frames);
+    }
 
     // initialize event outputs (zero)
     carla_zeroStructs(data->events.out, kMaxEngineEventInternalCount);
@@ -2800,12 +2803,12 @@ void EngineInternalGraph::process(CarlaEngine::ProtectedData* const data, const 
     }
 }
 
-void EngineInternalGraph::processRack(CarlaEngine::ProtectedData* const data, const float* inBuf[2], float* outBuf[2], const uint32_t frames)
+void EngineInternalGraph::processRack(CarlaEngine::ProtectedData* const data, const float* inBuf[], float* outBuf[], const uint32_t frames, const uint32_t channels)
 {
     CARLA_SAFE_ASSERT_RETURN(fIsRack,);
     CARLA_SAFE_ASSERT_RETURN(fRack != nullptr,);
 
-    fRack->process(data, inBuf, outBuf, frames);
+    fRack->process(data, inBuf, outBuf, frames, channels);
 }
 
 // -----------------------------------------------------------------------
