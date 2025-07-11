@@ -42,6 +42,9 @@ class CarlaBackendBridge:
         self._error_handler = get_error_handler()
         self._cleanup_performed = False
         
+        # Track patchbay connections
+        self._patchbay_connections = {}
+        
     # --------------------------------------------------------------------------------------------------------
     # Connection & Engine Status
     
@@ -490,15 +493,45 @@ class CarlaBackendBridge:
             True if connection was successful
         """
         try:
+            # Log detailed connection attempt info
+            self.logger.info(f"=== PATCHBAY CONNECTION ATTEMPT ===")
+            self.logger.info(f"Source: Group {group_a}, Port {port_a}")
+            self.logger.info(f"Dest: Group {group_b}, Port {port_b}")
+            
+            # Get group info for debugging
+            try:
+                groups = self.get_patchbay_groups()
+                source_group = next((g for g in groups if g['id'] == group_a), None)
+                dest_group = next((g for g in groups if g['id'] == group_b), None)
+                
+                if source_group:
+                    self.logger.info(f"Source group: {source_group['name']} (type: {source_group.get('type', 'unknown')})")
+                if dest_group:
+                    self.logger.info(f"Dest group: {dest_group['name']} (type: {dest_group.get('type', 'unknown')})")
+            except:
+                pass
+            
+            self.logger.info(f"Calling host.patchbay_connect(False, {group_a}, {port_a}, {group_b}, {port_b})")
+            
             success = self.host.patchbay_connect(False, group_a, port_a, group_b, port_b)
             if success:
-                self.logger.info(f"Successfully connected ports: {group_a}:{port_a} -> {group_b}:{port_b}")
+                self.logger.info(f"✓ Successfully connected ports: {group_a}:{port_a} -> {group_b}:{port_b}")
+                # Track the connection - we'll get the ID from the callback
+                # For now, store with a temporary key
+                temp_key = f"{group_a}:{port_a}:{group_b}:{port_b}"
+                self._patchbay_connections[temp_key] = {
+                    'group_a': group_a,
+                    'port_a': port_a,
+                    'group_b': group_b,
+                    'port_b': port_b,
+                    'pending': True
+                }
                 return True
             else:
-                self.logger.error(f"Failed to connect ports: {group_a}:{port_a} -> {group_b}:{port_b}")
+                self.logger.error(f"✗ Failed to connect ports: {group_a}:{port_a} -> {group_b}:{port_b}")
                 return False
         except Exception as e:
-            self.logger.error(f"Error connecting ports {group_a}:{port_a} -> {group_b}:{port_b}: {e}")
+            self.logger.error(f"✗ Error connecting ports {group_a}:{port_a} -> {group_b}:{port_b}: {e}")
             return False
     
     def patchbay_disconnect(self, connection_id: int) -> bool:
@@ -522,6 +555,62 @@ class CarlaBackendBridge:
         except Exception as e:
             self.logger.error(f"Error disconnecting connection {connection_id}: {e}")
             return False
+    
+    def get_patchbay_connections(self) -> List[Dict[str, Any]]:
+        """
+        Get list of current patchbay connections
+        
+        Returns:
+            List of connection dictionaries
+        """
+        # Return non-pending connections
+        return [
+            {**conn, 'id': conn_id} 
+            for conn_id, conn in self._patchbay_connections.items() 
+            if isinstance(conn_id, int) and not conn.get('pending', False)
+        ]
+    
+    def register_connection(self, connection_id: int, group_a: int, port_a: int, group_b: int, port_b: int):
+        """
+        Register a connection that was made (called from callback)
+        
+        Args:
+            connection_id: The connection ID assigned by Carla
+            group_a: Source group ID
+            port_a: Source port ID
+            group_b: Destination group ID
+            port_b: Destination port ID
+        """
+        # Check if we have a pending connection matching these parameters
+        temp_key = f"{group_a}:{port_a}:{group_b}:{port_b}"
+        
+        if temp_key in self._patchbay_connections:
+            # Move from temp key to proper ID
+            conn_data = self._patchbay_connections.pop(temp_key)
+            conn_data['pending'] = False
+            self._patchbay_connections[connection_id] = conn_data
+        else:
+            # Connection made outside MCP, still track it
+            self._patchbay_connections[connection_id] = {
+                'group_a': group_a,
+                'port_a': port_a,
+                'group_b': group_b,
+                'port_b': port_b,
+                'pending': False
+            }
+        
+        self.logger.info(f"Registered connection {connection_id}: {group_a}:{port_a} -> {group_b}:{port_b}")
+    
+    def unregister_connection(self, connection_id: int):
+        """
+        Remove a connection from tracking (called from callback)
+        
+        Args:
+            connection_id: The connection ID to remove
+        """
+        if connection_id in self._patchbay_connections:
+            del self._patchbay_connections[connection_id]
+            self.logger.info(f"Unregistered connection {connection_id}")
     
     def patchbay_refresh(self) -> bool:
         """
@@ -555,15 +644,58 @@ class CarlaBackendBridge:
             # Get current plugin count to iterate through plugin groups
             plugin_count = self.get_plugin_count()
             
-            # Add system audio group (always group 0 in patchbay mode)
+            # Group IDs in Carla patchbay:
+            # 0 = Audio Input group
+            # 1 = Audio Output group  
+            # 2 = Midi Input group
+            # 3 = Midi Output group
+            # 4+ = Plugin groups
+            
+            # Add Audio Input group
             groups.append({
                 'id': 0,
-                'name': 'System',
-                'type': 'system',
-                'port_count': 2  # Assume stereo system ports
+                'name': 'Audio Input',
+                'type': 'audio_input',
+                'port_count': 16,  # Carla typically has 16 audio inputs
+                'ports': {
+                    'outputs': [f'Capture {i+1}' for i in range(16)]  # Audio inputs have outputs in patchbay
+                }
             })
             
-            # Add plugin groups (each plugin gets its own group)
+            # Add Audio Output group
+            groups.append({
+                'id': 1,
+                'name': 'Audio Output',
+                'type': 'audio_output',
+                'port_count': 16,  # Carla typically has 16 audio outputs
+                'ports': {
+                    'inputs': [f'Playback {i+1}' for i in range(16)]  # Audio outputs have inputs in patchbay
+                }
+            })
+            
+            # Add Midi Input group
+            groups.append({
+                'id': 2,
+                'name': 'Midi Input',
+                'type': 'midi_input',
+                'port_count': 1,
+                'ports': {
+                    'outputs': ['Capture 1']
+                }
+            })
+            
+            # Add Midi Output group
+            groups.append({
+                'id': 3,
+                'name': 'Midi Output',
+                'type': 'midi_output',
+                'port_count': 1,
+                'ports': {
+                    'inputs': ['Playback 1']
+                }
+            })
+            
+            # Add plugin groups (starting from group ID 4)
             for i in range(plugin_count):
                 plugin_info = self.get_plugin_info(i)
                 if plugin_info:
@@ -582,15 +714,15 @@ class CarlaBackendBridge:
                         audio_outs = 2
                     
                     groups.append({
-                        'id': i + 1,  # Plugin groups start at 1
+                        'id': i + 4,  # Plugin groups start at 4
                         'name': plugin_info.get('name', f'Plugin {i}'),
                         'type': 'plugin',
                         'plugin_id': i,
                         'audio_inputs': audio_ins,
                         'audio_outputs': audio_outs,
                         'ports': {
-                            'inputs': [f'input_{j+1}' for j in range(audio_ins)],
-                            'outputs': [f'output_{j+1}' for j in range(audio_outs)]
+                            'inputs': [f'Audio Input {j+1}' for j in range(audio_ins)],
+                            'outputs': [f'Audio Output {j+1}' for j in range(audio_outs)]
                         }
                     })
             

@@ -169,6 +169,40 @@ def register_all_resources(backend_bridge):
     logger.info("All resources registered successfully")
 
 
+def setup_patchbay_callbacks(carla_host_instance):
+    """Set up callbacks to track patchbay connections"""
+    logger.info("Setting up patchbay connection tracking callbacks...")
+    
+    try:
+        # Connect to the connection added callback
+        def on_connection_added(connection_id, group_out_id, port_out_id, group_in_id, port_in_id):
+            logger.info(f"Patchbay connection added: ID={connection_id}, {group_out_id}:{port_out_id} -> {group_in_id}:{port_in_id}")
+            if backend_bridge:
+                backend_bridge.register_connection(connection_id, group_out_id, port_out_id, group_in_id, port_in_id)
+        
+        # Connect to the connection removed callback
+        def on_connection_removed(connection_id, port_out_id, port_in_id):
+            logger.info(f"Patchbay connection removed: ID={connection_id}")
+            if backend_bridge:
+                backend_bridge.unregister_connection(connection_id)
+        
+        # Connect the callbacks
+        if hasattr(carla_host_instance, 'PatchbayConnectionAddedCallback'):
+            carla_host_instance.PatchbayConnectionAddedCallback.connect(on_connection_added)
+            logger.info("Connected to PatchbayConnectionAddedCallback")
+        else:
+            logger.warning("PatchbayConnectionAddedCallback not found on host instance")
+            
+        if hasattr(carla_host_instance, 'PatchbayConnectionRemovedCallback'):
+            carla_host_instance.PatchbayConnectionRemovedCallback.connect(on_connection_removed)
+            logger.info("Connected to PatchbayConnectionRemovedCallback")
+        else:
+            logger.warning("PatchbayConnectionRemovedCallback not found on host instance")
+            
+    except Exception as e:
+        logger.error(f"Failed to set up patchbay callbacks: {e}")
+
+
 
 def mcp_server_async_thread(carla_host_instance=None):
     """Run async MCP server in background thread"""
@@ -226,6 +260,9 @@ def start_mcp_server(carla_host_instance=None):
         global backend_bridge
         backend_bridge = CarlaBackendBridge(carla_host_instance)
         logger.info(f"Created backend bridge: {backend_bridge}")
+        
+        # Set up callbacks to track patchbay connections
+        setup_patchbay_callbacks(carla_host_instance)
         
         # Register tools and resources with shared bridge
         register_all_tools(backend_bridge)

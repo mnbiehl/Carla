@@ -356,33 +356,38 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         Returns:
             Status message
         """
+        debug_info = []
+        
         if not backend_bridge:
             return "❌ Backend API not available."
         
         try:
             # Check if in patchbay mode
             current_mode = backend_bridge.get_engine_process_mode()
+            debug_info.append(f"Current engine mode: {current_mode}")
             if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
                 return "❌ Port connections only work in patchbay mode. Use switch_to_patchbay_mode() first."
             
             # Get available groups to find IDs
             groups = backend_bridge.get_patchbay_groups()
+            debug_info.append(f"Found {len(groups)} groups")
             
             # Find group IDs by name
             group_a_id = None
             group_b_id = None
             
             for group in groups:
+                debug_info.append(f"Group {group['id']}: '{group['name']}' (type: {group.get('type', 'unknown')})")
                 if group['name'].lower() == group_a_name.lower():
                     group_a_id = group['id']
                 if group['name'].lower() == group_b_name.lower():
                     group_b_id = group['id']
             
             if group_a_id is None:
-                return f"❌ Source group '{group_a_name}' not found. Available groups: {[g['name'] for g in groups]}"
+                return f"❌ Source group '{group_a_name}' not found. Available groups: {[g['name'] for g in groups]}\n\nDebug:\n" + "\n".join(debug_info)
             
             if group_b_id is None:
-                return f"❌ Destination group '{group_b_name}' not found. Available groups: {[g['name'] for g in groups]}"
+                return f"❌ Destination group '{group_b_name}' not found. Available groups: {[g['name'] for g in groups]}\n\nDebug:\n" + "\n".join(debug_info)
             
             # Port offset constants from Carla backend
             # Audio ports need proper offsets:
@@ -393,41 +398,84 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             port_a_id = 0
             port_b_id = 0
             
-            # Common port naming patterns
-            if any(x in port_a_name.lower() for x in ['output', 'out', 'capture']):
-                # Source is output port
-                if '2' in port_a_name or 'r' in port_a_name.lower():
-                    port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1  # Right channel
-                else:
-                    port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0  # Left channel
-            elif any(x in port_a_name.lower() for x in ['input', 'in']):
-                # Source is input port (less common for sources)
-                if '2' in port_a_name or 'r' in port_a_name.lower():
-                    port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
-                else:
-                    port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+            # Extract port number from names like "Audio Input 1", "Capture 1", "Playback 1"
+            import re
             
-            if any(x in port_b_name.lower() for x in ['input', 'in', 'playback']):
-                # Destination is input port
-                if '2' in port_b_name or 'r' in port_b_name.lower():
-                    port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1  # Right channel
-                else:
-                    port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0  # Left channel
-            elif any(x in port_b_name.lower() for x in ['output', 'out']):
-                # Destination is output port (less common for destinations)
-                if '2' in port_b_name or 'r' in port_b_name.lower():
-                    port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1
-                else:
-                    port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0
+            # Helper function to extract port number
+            def extract_port_number(port_name):
+                match = re.search(r'(\d+)', port_name)
+                if match:
+                    return int(match.group(1)) - 1  # Convert to 0-based index
+                return 0
             
-            success = backend_bridge.patchbay_connect(group_a_id, port_a_id, group_b_id, port_b_id)
+            # Get source group info to determine port type
+            source_group = next((g for g in groups if g['id'] == group_a_id), None)
+            dest_group = next((g for g in groups if g['id'] == group_b_id), None)
+            
+            debug_info.append(f"\nSource group: {source_group}")
+            debug_info.append(f"Dest group: {dest_group}")
+            
+            if source_group:
+                port_index = extract_port_number(port_a_name)
+                debug_info.append(f"Source port '{port_a_name}' extracted index: {port_index}")
+                
+                # Determine port ID based on group type and port type
+                if source_group['type'] == 'audio_input':
+                    # Audio Input group ports are outputs
+                    port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                    debug_info.append(f"Source is audio_input, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_a_id}")
+                elif source_group['type'] == 'audio_output':
+                    # Audio Output group ports are inputs (shouldn't be source normally)
+                    port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                    debug_info.append(f"Source is audio_output, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_a_id}")
+                elif source_group['type'] == 'plugin':
+                    # Plugin ports - check if it's input or output
+                    if any(x in port_a_name.lower() for x in ['output', 'out']):
+                        port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                        debug_info.append(f"Source is plugin output, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_a_id}")
+                    else:
+                        port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                        debug_info.append(f"Source is plugin input, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_a_id}")
+            
+            if dest_group:
+                port_index = extract_port_number(port_b_name)
+                debug_info.append(f"Dest port '{port_b_name}' extracted index: {port_index}")
+                
+                # Determine port ID based on group type and port type
+                if dest_group['type'] == 'audio_output':
+                    # Audio Output group ports are inputs
+                    port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                    debug_info.append(f"Dest is audio_output, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_b_id}")
+                elif dest_group['type'] == 'audio_input':
+                    # Audio Input group ports are outputs (shouldn't be destination normally)
+                    port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                    debug_info.append(f"Dest is audio_input, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_b_id}")
+                elif dest_group['type'] == 'plugin':
+                    # Plugin ports - check if it's input or output
+                    if any(x in port_b_name.lower() for x in ['input', 'in']):
+                        port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                        debug_info.append(f"Dest is plugin input, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_b_id}")
+                    else:
+                        port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                        debug_info.append(f"Dest is plugin output, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_b_id}")
+            
+            debug_info.append(f"\nFinal connection: Group {group_a_id} Port {port_a_id} → Group {group_b_id} Port {port_b_id}")
+            
+            # IMPORTANT: The backend seems to use 1-based group IDs internally!
+            # Add 1 to group IDs to match what the GUI uses
+            backend_group_a_id = group_a_id + 1
+            backend_group_b_id = group_b_id + 1
+            
+            debug_info.append(f"Adjusted for backend: Group {backend_group_a_id} Port {port_a_id} → Group {backend_group_b_id} Port {port_b_id}")
+            
+            success = backend_bridge.patchbay_connect(backend_group_a_id, port_a_id, backend_group_b_id, port_b_id)
             if success:
-                return f"✅ Connected {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}"
+                return f"✅ Connected {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}\n\nDebug:\n" + "\n".join(debug_info)
             else:
-                return f"❌ Failed to connect {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}"
+                return f"❌ Failed to connect {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}\n\nDebug:\n" + "\n".join(debug_info)
                 
         except Exception as e:
-            return f"❌ Error connecting ports: {e}"
+            return f"❌ Error connecting ports: {e}\n\nDebug:\n" + "\n".join(debug_info)
     
     @mcp.tool()
     def list_patchbay_connections() -> str:
@@ -446,18 +494,74 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
                 return "❌ Patchbay connections only available in patchbay mode."
             
-            # Note: This is a simplified implementation
-            # The Carla backend doesn't expose a direct "get_connections" method
-            # In a full implementation, this would need to track connections
-            # or parse them from the patchbay state
+            # Get tracked connections
+            connections = backend_bridge.get_patchbay_connections()
+            
+            # Get groups for name mapping
+            groups = backend_bridge.get_patchbay_groups()
+            group_map = {g['id']: g['name'] for g in groups}
+            
+            # Format connections with names
+            formatted_connections = []
+            for conn in connections:
+                # Adjust group IDs (subtract 1 to get back to our IDs)
+                src_group_id = conn['group_a'] - 1
+                dst_group_id = conn['group_b'] - 1
+                
+                formatted_connections.append({
+                    'id': conn['id'],
+                    'source': {
+                        'group_id': src_group_id,
+                        'group_name': group_map.get(src_group_id, f"Unknown({src_group_id})"),
+                        'port_id': conn['port_a']
+                    },
+                    'destination': {
+                        'group_id': dst_group_id,
+                        'group_name': group_map.get(dst_group_id, f"Unknown({dst_group_id})"),
+                        'port_id': conn['port_b']
+                    }
+                })
             
             result = {
                 'mode': 'patchbay',
-                'message': 'Connection listing not yet implemented. Use Carla GUI patchbay view for now.',
-                'suggestion': 'Check the Carla patchbay tab to see current connections visually.'
+                'connection_count': len(connections),
+                'connections': formatted_connections
             }
             
             return json.dumps(result, indent=2)
             
         except Exception as e:
             return f"❌ Error listing connections: {e}"
+    
+    @mcp.tool()
+    def disconnect_patchbay_connection(connection_id: int) -> str:
+        """
+        Disconnect a patchbay connection by ID
+        
+        Use list_patchbay_connections() to get connection IDs
+        
+        Args:
+            connection_id: The connection ID to disconnect
+            
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            # Check if in patchbay mode
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
+                return "❌ Port disconnection only works in patchbay mode."
+            
+            # Disconnect using the connection ID
+            success = backend_bridge.patchbay_disconnect(connection_id)
+            
+            if success:
+                return f"✅ Disconnected connection ID {connection_id}"
+            else:
+                return f"❌ Failed to disconnect connection ID {connection_id}"
+            
+        except Exception as e:
+            return f"❌ Error disconnecting connection: {e}"
