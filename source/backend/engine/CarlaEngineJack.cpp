@@ -37,7 +37,7 @@
 #define URI_TYPE_STRING  "text/plain"
 
 // Maximum number of rack audio channels (inputs and outputs)
-#define MAX_RACK_AUDIO_CHANNELS 8
+#define MAX_RACK_AUDIO_CHANNELS 16
 
 CARLA_BACKEND_START_NAMESPACE
 
@@ -1539,25 +1539,20 @@ public:
 
         if (opts.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK || opts.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
         {
-            // Register audio input ports
-            fRackPorts[kRackPortAudioIn1] = jackbridge_port_register(fClient, "audio-in1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn2] = jackbridge_port_register(fClient, "audio-in2", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn3] = jackbridge_port_register(fClient, "audio-in3", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn4] = jackbridge_port_register(fClient, "audio-in4", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn5] = jackbridge_port_register(fClient, "audio-in5", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn6] = jackbridge_port_register(fClient, "audio-in6", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn7] = jackbridge_port_register(fClient, "audio-in7", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn8] = jackbridge_port_register(fClient, "audio-in8", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+            // Register audio input ports (16 channels)
+            char portName[32];
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                std::snprintf(portName, 32, "audio-in%d", i + 1);
+                fRackPorts[kRackPortAudioIn1 + i] = jackbridge_port_register(fClient, portName, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+            }
             
-            // Register audio output ports
-            fRackPorts[kRackPortAudioOut1] = jackbridge_port_register(fClient, "audio-out1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut2] = jackbridge_port_register(fClient, "audio-out2", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut3] = jackbridge_port_register(fClient, "audio-out3", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut4] = jackbridge_port_register(fClient, "audio-out4", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut5] = jackbridge_port_register(fClient, "audio-out5", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut6] = jackbridge_port_register(fClient, "audio-out6", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut7] = jackbridge_port_register(fClient, "audio-out7", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut8] = jackbridge_port_register(fClient, "audio-out8", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+            // Register audio output ports (16 channels)
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                std::snprintf(portName, 32, "audio-out%d", i + 1);
+                fRackPorts[kRackPortAudioOut1 + i] = jackbridge_port_register(fClient, portName, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+            }
             
             // Register MIDI ports
             fRackPorts[kRackPortEventIn]  = jackbridge_port_register(fClient, "events-in",  JACK_DEFAULT_MIDI_TYPE, JackPortIsInput, 0);
@@ -2990,23 +2985,17 @@ protected:
             float* audioIn[MAX_RACK_AUDIO_CHANNELS];
             float* audioOut[MAX_RACK_AUDIO_CHANNELS];
             
-            audioIn[0] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn1], nframes);
-            audioIn[1] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn2], nframes);
-            audioIn[2] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn3], nframes);
-            audioIn[3] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn4], nframes);
-            audioIn[4] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn5], nframes);
-            audioIn[5] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn6], nframes);
-            audioIn[6] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn7], nframes);
-            audioIn[7] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn8], nframes);
+            // Get all input buffers
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                audioIn[i] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn1 + i], nframes);
+            }
             
-            audioOut[0] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut1], nframes);
-            audioOut[1] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut2], nframes);
-            audioOut[2] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut3], nframes);
-            audioOut[3] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut4], nframes);
-            audioOut[4] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut5], nframes);
-            audioOut[5] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut6], nframes);
-            audioOut[6] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut7], nframes);
-            audioOut[7] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut8], nframes);
+            // Get all output buffers
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                audioOut[i] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut1 + i], nframes);
+            }
             
             void* const eventIn  = jackbridge_port_get_buffer(fRackPorts[kRackPortEventIn],  nframes);
             void* const eventOut = jackbridge_port_get_buffer(fRackPorts[kRackPortEventOut], nframes);
@@ -3636,17 +3625,33 @@ private:
         kRackPortAudioIn6  = 5,
         kRackPortAudioIn7  = 6,
         kRackPortAudioIn8  = 7,
-        kRackPortAudioOut1 = 8,
-        kRackPortAudioOut2 = 9,
-        kRackPortAudioOut3 = 10,
-        kRackPortAudioOut4 = 11,
-        kRackPortAudioOut5 = 12,
-        kRackPortAudioOut6 = 13,
-        kRackPortAudioOut7 = 14,
-        kRackPortAudioOut8 = 15,
-        kRackPortEventIn   = 16,
-        kRackPortEventOut  = 17,
-        kRackPortCount     = 18
+        kRackPortAudioIn9  = 8,
+        kRackPortAudioIn10 = 9,
+        kRackPortAudioIn11 = 10,
+        kRackPortAudioIn12 = 11,
+        kRackPortAudioIn13 = 12,
+        kRackPortAudioIn14 = 13,
+        kRackPortAudioIn15 = 14,
+        kRackPortAudioIn16 = 15,
+        kRackPortAudioOut1  = 16,
+        kRackPortAudioOut2  = 17,
+        kRackPortAudioOut3  = 18,
+        kRackPortAudioOut4  = 19,
+        kRackPortAudioOut5  = 20,
+        kRackPortAudioOut6  = 21,
+        kRackPortAudioOut7  = 22,
+        kRackPortAudioOut8  = 23,
+        kRackPortAudioOut9  = 24,
+        kRackPortAudioOut10 = 25,
+        kRackPortAudioOut11 = 26,
+        kRackPortAudioOut12 = 27,
+        kRackPortAudioOut13 = 28,
+        kRackPortAudioOut14 = 29,
+        kRackPortAudioOut15 = 30,
+        kRackPortAudioOut16 = 31,
+        kRackPortEventIn    = 32,
+        kRackPortEventOut   = 33,
+        kRackPortCount      = 34
     };
 
     jack_port_t* fRackPorts[kRackPortCount];
