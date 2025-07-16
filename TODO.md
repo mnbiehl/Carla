@@ -137,6 +137,12 @@ Carla MCP Server
   - Research Carla's `.carxp` project file format and leverage existing save/load infrastructure
   - Integrate with Carla's native project system for compatibility and robustness
 - [ ] **Effects Chain Grouping System**: Add group ID/name system to differentiate and manage multiple input chains (guitar, bass, vocals, etc.) with proper chain identification and management
+- [ ] **Parameter Adjustment & Gain Staging Research**: Research and implement improved parameter adjustment algorithms and automatic gain staging techniques
+  - Study professional mixing practices for optimal parameter ranges
+  - Implement intelligent parameter suggestions based on audio content analysis
+  - Research adaptive gain staging that responds to input dynamics
+  - Investigate frequency-aware parameter adjustment for different instruments
+  - Add parameter learning system that improves suggestions over time
 
 ### Code Quality Improvements
 - [x] **Eliminate Constants Duplication**: Created single source of truth in constants.py module
