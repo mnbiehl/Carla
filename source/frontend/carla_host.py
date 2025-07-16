@@ -235,6 +235,9 @@ class HostWindow(QMainWindow):
 
         # true if NSM server handles our window management
         self.fWindowCloseHideGui = False
+        
+        # true if there are unsaved changes
+        self.fHasUnsavedChanges = False
 
         if host.isControl:
             self.fClientName         = "Carla-Control"
@@ -639,6 +642,7 @@ class HostWindow(QMainWindow):
         host.PluginAddedCallback.connect(self.slot_handlePluginAddedCallback)
         host.PluginRemovedCallback.connect(self.slot_handlePluginRemovedCallback)
         host.ReloadAllCallback.connect(self.slot_handleReloadAllCallback)
+        host.ParameterValueChangedCallback.connect(self.slot_handleParameterValueChangedCallback)
 
         host.NoteOnCallback.connect(self.slot_handleNoteOnCallback)
         host.NoteOffCallback.connect(self.slot_handleNoteOffCallback)
@@ -821,6 +825,12 @@ class HostWindow(QMainWindow):
     def setLoadRDFsNeeded(self):
         self.fLadspaRdfNeedsUpdate = True
 
+    def setProjectModified(self, modified):
+        """Mark the project as having unsaved changes"""
+        if self.fHasUnsavedChanges != modified:
+            self.fHasUnsavedChanges = modified
+            self.setProperWindowTitle()
+    
     def setProperWindowTitle(self):
         title = self.fClientName
 
@@ -828,6 +838,8 @@ class HostWindow(QMainWindow):
             title += " - %s" % os.path.basename(self.fProjectFilename)
         if self.fSessionManagerName:
             title += " (%s)" % self.fSessionManagerName
+        if self.fHasUnsavedChanges:
+            title += " *"
 
         self.setWindowTitle(title)
 
@@ -882,6 +894,9 @@ class HostWindow(QMainWindow):
                              self.host.get_last_error(),
                              QMessageBox.Ok, QMessageBox.Ok)
             return
+        
+        # Clear unsaved changes flag after successful save
+        self.setProjectModified(False)
 
     def projectLoadingStarted(self):
         self.ui.rack.setEnabled(False)
@@ -931,6 +946,8 @@ class HostWindow(QMainWindow):
         self.fProjectFilename = ""
         self.setProperWindowTitle()
         self.host.clear_project_filename()
+        # Clear unsaved changes flag for new project
+        self.setProjectModified(False)
 
     @pyqtSlot()
     def slot_fileOpen(self):
@@ -1251,6 +1268,8 @@ class HostWindow(QMainWindow):
     def slot_handleProjectLoadFinishedCallback(self):
         self.fIsProjectLoading = False
         self.projectLoadingFinished(False)
+        # Clear unsaved changes flag after loading project
+        self.setProjectModified(False)
 
     # --------------------------------------------------------------------------------------------------------
     # Plugins
@@ -1565,6 +1584,10 @@ class HostWindow(QMainWindow):
 
         if pluginType == PLUGIN_LV2:
             self.fHasLoadedLv2Plugins = True
+        
+        # Mark project as modified
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     @pyqtSlot(int)
     def slot_handlePluginRemovedCallback(self, pluginId):
@@ -1600,6 +1623,16 @@ class HostWindow(QMainWindow):
             pitem.setPluginId(i)
 
         self.ui.act_plugin_remove_all.setEnabled(True)
+        
+        # Mark project as modified
+        if not self.fCurrentlyRemovingAllPlugins:
+            self.setProjectModified(True)
+    
+    @pyqtSlot(int, int, float)
+    def slot_handleParameterValueChangedCallback(self, pluginId, parameterId, value):
+        # Mark project as modified when parameters change
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     # --------------------------------------------------------------------------------------------------------
     # Canvas
@@ -1991,11 +2024,17 @@ class HostWindow(QMainWindow):
     def slot_handlePatchbayConnectionAddedCallback(self, connectionId, groupOutId, portOutId, groupInId, portInId):
         patchcanvas.connectPorts(connectionId, groupOutId, portOutId, groupInId, portInId)
         self.updateMiniCanvasLater()
+        # Mark project as modified
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     @pyqtSlot(int, int, int)
     def slot_handlePatchbayConnectionRemovedCallback(self, connectionId, portOutId, portInId):
         patchcanvas.disconnectPorts(connectionId)
         self.updateMiniCanvasLater()
+        # Mark project as modified
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     # --------------------------------------------------------------------------------------------------------
     # Settings
@@ -3117,6 +3156,26 @@ class HostWindow(QMainWindow):
             self.hideForNSM()
             self.host.nsm_ready(NSM_CALLBACK_HIDE_OPTIONAL_GUI)
             return
+        
+        # Check for unsaved changes
+        if self.fHasUnsavedChanges:
+            ret = CustomMessageBox(self, QMessageBox.Warning, self.tr("Unsaved Changes"),
+                                  self.tr("There are unsaved changes. Do you want to save them before closing?"),
+                                  "",
+                                  QMessageBox.Save|QMessageBox.Discard|QMessageBox.Cancel,
+                                  QMessageBox.Save)
+            
+            if ret == QMessageBox.Save:
+                # Save project
+                self.slot_fileSave()
+                # If save was cancelled or failed, abort close
+                if self.fHasUnsavedChanges:
+                    event.ignore()
+                    return
+            elif ret == QMessageBox.Cancel:
+                event.ignore()
+                return
+            # QMessageBox.Discard - continue with close
 
         patchcanvas.handleAllPluginsRemoved()
 

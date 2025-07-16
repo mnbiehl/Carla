@@ -33,11 +33,13 @@ from .tools.midi import register_midi_tools
 from .tools.transport import register_transport_tools
 from .tools.sessions import register_session_tools
 from .tools.routing import register_routing_tools
+from .tools.auto_gain import register_auto_gain_tools
 
 # Import resource registration functions
 from .resources.status import register_status_resources
 from .resources.help import register_help_resources
 from .resources.monitoring import register_monitoring_resources
+from .resources.realtime_monitoring import register_realtime_monitoring
 
 
 def initialize_mcp_server(carla_host_instance=None):
@@ -105,6 +107,15 @@ def register_custom_endpoints():
             from starlette.responses import JSONResponse
             return JSONResponse(content={"error": "Invalid request"}, status_code=400)
     
+    # Add SSE endpoint for real-time monitoring
+    try:
+        from .resources.realtime_monitoring import create_sse_endpoint
+        monitoring_endpoint = create_sse_endpoint(mcp_server)
+        mcp_server.custom_route("/monitoring/events", methods=["GET"])(monitoring_endpoint)
+        logger.info("Registered SSE monitoring endpoint at /monitoring/events")
+    except Exception as e:
+        logger.warning(f"Could not register SSE monitoring endpoint: {e}")
+    
     logger.info("Registered custom endpoints for Claude Code compatibility")
 
 
@@ -150,6 +161,9 @@ def register_all_tools(backend_bridge):
     # Register routing tools with backend support
     register_routing_tools(mcp_server, backend_bridge)
     
+    # Register auto-gain tools
+    register_auto_gain_tools(mcp_server, backend_bridge)
+    
     logger.info("All tools registered successfully")
 
 
@@ -165,6 +179,9 @@ def register_all_resources(backend_bridge):
     
     # Register monitoring resources
     register_monitoring_resources(mcp_server, backend_bridge)
+    
+    # Register real-time monitoring resources
+    register_realtime_monitoring(mcp_server, backend_bridge)
     
     logger.info("All resources registered successfully")
 
@@ -267,6 +284,10 @@ def start_mcp_server(carla_host_instance=None):
         # Register tools and resources with shared bridge
         register_all_tools(backend_bridge)
         register_all_resources(backend_bridge)
+        
+        # Register custom endpoints including SSE monitoring
+        register_custom_endpoints()
+        
         logger.info("All tools and resources registered successfully")
     except Exception as e:
         logger.error(f"Failed to register tools and resources: {e}")

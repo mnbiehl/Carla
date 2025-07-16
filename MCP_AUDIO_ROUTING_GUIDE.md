@@ -1,43 +1,52 @@
 # Carla MCP Audio Routing Guide for LLM Agents
 
-This guide explains how to use the Carla MCP (Model Context Protocol) server to create complex audio routing setups, connecting external JACK applications through Carla's powerful plugin host.
+This guide explains how to use the Carla MCP (Model Context Protocol) server to create audio routing setups, connecting looper tracks through Carla's plugin host for effects processing.
 
 ## Overview
 
 The Carla MCP allows you to:
-- Control Carla's plugin host programmatically
-- Route audio between external JACK applications and Carla plugins
-- Manage connections in Carla's patchbay mode
-- Apply effects and processing to external audio sources
+- Control Carla's plugin host programmatically in **patchbay mode only**
+- Route looper tracks (stereo) to Carla mono inputs via JACK
+- Process audio through plugin effects chains
+- Output all processed audio to Carla outputs 1/2 (stereo)
 
 ## Key Concepts
 
 ### 1. Audio Flow Architecture
 ```
-External App (e.g., Loopers) → JACK → Carla Input → Plugin Effects → Carla Output → System Speakers
+Looper Track (stereo L/R) → JACK → Carla Input (mono) → Plugin Effects → Carla Output 1/2 (stereo) → System Speakers
 ```
 
-### 2. Connection Types
-- **External JACK connections**: Use `jack_connect` CLI commands
-- **Internal Carla connections**: Use MCP patchbay tools
+### 2. Routing Rules
+- **Always use patchbay mode** - More flexible routing for effects chains
+- **Looper connections**: Use `jack_connect` CLI to connect stereo looper outputs to mono Carla inputs
+- **Output routing**: All effects chains route to Carla outputs 1/2 only
 
-### 3. Important: Group ID Offset
+### 3. Connection Types
+- **External JACK connections**: Use `jack_connect` CLI commands for looper → Carla
+- **Internal Carla connections**: Use MCP patchbay tools for plugin routing
+
+### 4. Important: Group ID Offset
 The Carla backend uses 1-based group IDs internally, while the MCP API shows 0-based IDs. The MCP tools handle this automatically.
 
-## Common Workflow: Processing External Audio
+## Standard Workflow: Processing Looper Tracks
 
-### Step 1: Switch to Patchbay Mode
+### Step 1: Ensure Patchbay Mode (Should Already Be Active)
 ```python
-mcp__carla-mcp__switch_to_patchbay_mode()
+# Carla should always be in patchbay mode
+mcp__carla-mcp__get_current_engine_mode()  # Verify mode
 ```
-Patchbay mode allows flexible routing between plugins and I/O.
 
-### Step 2: Connect External Application to Carla
-Use JACK CLI to connect external apps to Carla's inputs:
+### Step 2: Connect Looper Track to Carla Input
+Connect both stereo outputs from a looper track to a single Carla mono input:
 ```bash
-# Example: Connect a looper to Carla
+# Connect looper track 0 (stereo) to Carla input 1 (mono)
 jack_connect loopers:loop0_out_l Carla:audio-in1
-jack_connect loopers:loop0_out_r Carla:audio-in1  # Mono sum for stereo sources
+jack_connect loopers:loop0_out_r Carla:audio-in1
+
+# For additional tracks, use different Carla inputs
+jack_connect loopers:loop1_out_l Carla:audio-in2
+jack_connect loopers:loop1_out_r Carla:audio-in2
 ```
 
 ### Step 3: Add Audio Plugins
@@ -70,12 +79,18 @@ mcp__carla-mcp__connect_patchbay_ports(
     port_b_name="Audio Input 2"
 )
 
-# Connect plugin output to system
+# Connect plugin outputs to Carla outputs 1/2 ONLY
 mcp__carla-mcp__connect_patchbay_ports(
     group_a_name="Dragonfly Room Reverb",
     port_a_name="Audio Output 1",
     group_b_name="Audio Output",
     port_b_name="Playback 1"
+)
+mcp__carla-mcp__connect_patchbay_ports(
+    group_a_name="Dragonfly Room Reverb",
+    port_a_name="Audio Output 2",
+    group_b_name="Audio Output",
+    port_b_name="Playback 2"
 )
 ```
 
@@ -119,32 +134,65 @@ mcp__carla-mcp__get_plugin_info(plugin_id=0)  # Get parameter list
 mcp__carla-mcp__set_plugin_parameter(plugin_id=0, parameter_id=1, value=0.5)
 ```
 
-## Common Audio Routing Patterns
+### A/B Testing with Plugin Bypass
 
-### 1. Simple Effects Chain
-```
-External Audio → Carla Input → Effect 1 → Effect 2 → Carla Output → Speakers
+For A/B testing effects, use **bypass mode** instead of deactivating plugins. Bypass keeps the plugin in the audio chain but routes 100% dry signal through it:
+
+```python
+# BYPASS vs ACTIVE - Key Differences:
+# set_plugin_active(False) = Removes plugin from audio chain completely
+# Bypass mode = Keeps plugin loaded but passes 100% dry signal
+
+# Most plugins have a dry/wet parameter (often parameter 0)
+# Get parameter details first:
+mcp__carla-mcp__get_plugin_parameters(plugin_id=0)
+
+# Bypass plugin (100% dry signal)
+mcp__carla-mcp__set_plugin_parameter(plugin_id=0, parameter_id=0, value=0.0)
+
+# Restore processing (100% wet signal) 
+mcp__carla-mcp__set_plugin_parameter(plugin_id=0, parameter_id=0, value=1.0)
+
+# Partial blend (50% wet/dry mix)
+mcp__carla-mcp__set_plugin_parameter(plugin_id=0, parameter_id=0, value=0.5)
 ```
 
-### 2. Parallel Processing
-```
-External Audio → Carla Input ┬→ Effect 1 →┐
-                             └→ Effect 2 →┴→ Mixer → Output
+### Quick A/B Testing Examples
+```python
+# Example: A/B test reverb on plugin 0
+mcp__carla-mcp__set_plugin_parameter(0, 0, 0.0)  # Bypass - dry only
+mcp__carla-mcp__set_plugin_parameter(0, 0, 1.0)  # Process - wet only
+
+# Example: A/B test compressor on plugin 1  
+mcp__carla-mcp__set_plugin_parameter(1, 0, 0.0)  # Uncompressed
+mcp__carla-mcp__set_plugin_parameter(1, 0, 1.0)  # Compressed
+
+# Note: Check parameter names with get_plugin_parameters() first
+# Dry/wet might not always be parameter 0
 ```
 
-### 3. Mono to Stereo Processing
+## Standard Audio Routing Pattern
+
+### Looper to Effects Chain (Our Standard Setup)
 ```
-Mono External → Carla Input 1 ┬→ Plugin L Input
-                              └→ Plugin R Input
+Looper Track (stereo) → JACK → Carla Input N (mono) → Effects Chain → Carla Output 1/2 (stereo) → Speakers
 ```
+
+### Key Points:
+- Each looper track connects to its own Carla input (mono summed)
+- All effects chains output to Carla outputs 1/2 only
+- Multiple tracks can be processed through different effects chains
+- All chains converge to the same stereo output pair
 
 ## Tips and Best Practices
 
-1. **Always check current mode**: Some operations only work in patchbay mode
-2. **Use `get_patchbay_groups()` frequently**: Port names may vary by plugin
-3. **External connections persist**: JACK connections remain until explicitly disconnected
-4. **Plugin IDs are 0-based**: First plugin is ID 0
-5. **Save sessions**: Use Carla's session management for complex setups
+1. **Carla is always in patchbay mode**: No need to switch modes
+2. **One looper track per Carla input**: Connect both L/R to same input for mono sum
+3. **All outputs to 1/2**: Every effects chain routes to Carla outputs 1/2 only
+4. **Use `get_patchbay_groups()` frequently**: Port names may vary by plugin
+5. **External connections persist**: JACK connections remain until explicitly disconnected
+6. **Plugin IDs are 0-based**: First plugin is ID 0
+7. **⚠️ Audio must flow before monitoring**: Don't enable auto-gain or check meters until audio connections are established - there's no point in monitoring silence!
 
 ## Troubleshooting
 
@@ -166,24 +214,24 @@ Mono External → Carla Input 1 ┬→ Plugin L Input
 ## Example: Complete Looper Effects Setup
 
 ```python
-# 1. Setup
-mcp__carla-mcp__switch_to_patchbay_mode()
+# 1. Verify patchbay mode (should already be active)
+mcp__carla-mcp__get_current_engine_mode()
 
-# 2. External connection (in Bash)
+# 2. Connect looper track 0 to Carla input 1 (mono sum)
 Bash("jack_connect loopers:loop0_out_l Carla:audio-in1")
 Bash("jack_connect loopers:loop0_out_r Carla:audio-in1")
 
-# 3. Add reverb
+# 3. Add reverb plugin
 mcp__carla-mcp__add_plugin_by_name("TAP Reverberator")
 
-# 4. Route through reverb
+# 4. Route: Carla Input 1 → Reverb → Carla Output 1/2
 mcp__carla-mcp__connect_patchbay_ports("Audio Input", "Capture 1", "TAP Reverberator", "Input L")
 mcp__carla-mcp__connect_patchbay_ports("Audio Input", "Capture 1", "TAP Reverberator", "Input R")
 mcp__carla-mcp__connect_patchbay_ports("TAP Reverberator", "Output L", "Audio Output", "Playback 1")
 mcp__carla-mcp__connect_patchbay_ports("TAP Reverberator", "Output R", "Audio Output", "Playback 2")
 
-# 5. Adjust reverb
+# 5. Adjust reverb parameters
 mcp__carla-mcp__set_plugin_parameter(0, 0, 0.3)  # Adjust wet/dry mix
 ```
 
-This creates a complete audio path from your looper through reverb to the speakers!
+This creates a mono-summed input from your looper, processes it through reverb, and outputs stereo to Carla outputs 1/2!

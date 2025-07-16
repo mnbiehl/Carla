@@ -5,6 +5,7 @@ Tools for managing audio/MIDI connections and patchbay operations.
 """
 
 import json
+from typing import List, Dict
 from fastmcp import FastMCP
 from ..backend.backend_bridge import CarlaBackendBridge
 from ..utils.error_handler import get_error_handler
@@ -419,15 +420,11 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                 port_index = extract_port_number(port_a_name)
                 debug_info.append(f"Source port '{port_a_name}' extracted index: {port_index}")
                 
-                # Determine port ID based on group type and port type
+                # Apply correct port offsets based on manual connection analysis
                 if source_group['type'] == 'audio_input':
-                    # Audio Input group ports are outputs
+                    # Audio Input ports are outputs - use 510 offset
                     port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
                     debug_info.append(f"Source is audio_input, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_a_id}")
-                elif source_group['type'] == 'audio_output':
-                    # Audio Output group ports are inputs (shouldn't be source normally)
-                    port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
-                    debug_info.append(f"Source is audio_output, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_a_id}")
                 elif source_group['type'] == 'plugin':
                     # Plugin ports - check if it's input or output
                     if any(x in port_a_name.lower() for x in ['output', 'out']):
@@ -436,20 +433,19 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                     else:
                         port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
                         debug_info.append(f"Source is plugin input, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_a_id}")
+                else:
+                    port_a_id = port_index
+                    debug_info.append(f"Source using raw port index: {port_index}")
             
             if dest_group:
                 port_index = extract_port_number(port_b_name)
                 debug_info.append(f"Dest port '{port_b_name}' extracted index: {port_index}")
                 
-                # Determine port ID based on group type and port type
+                # Apply correct port offsets based on manual connection analysis
                 if dest_group['type'] == 'audio_output':
-                    # Audio Output group ports are inputs
+                    # Audio Output ports are inputs - use 255 offset
                     port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
                     debug_info.append(f"Dest is audio_output, using INPUT offset: {PATCHBAY_PORT_AUDIO_INPUT_OFFSET} + {port_index} = {port_b_id}")
-                elif dest_group['type'] == 'audio_input':
-                    # Audio Input group ports are outputs (shouldn't be destination normally)
-                    port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
-                    debug_info.append(f"Dest is audio_input, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_b_id}")
                 elif dest_group['type'] == 'plugin':
                     # Plugin ports - check if it's input or output
                     if any(x in port_b_name.lower() for x in ['input', 'in']):
@@ -458,13 +454,19 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                     else:
                         port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
                         debug_info.append(f"Dest is plugin output, using OUTPUT offset: {PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET} + {port_index} = {port_b_id}")
+                else:
+                    port_b_id = port_index
+                    debug_info.append(f"Dest using raw port index: {port_index}")
             
             debug_info.append(f"\nFinal connection: Group {group_a_id} Port {port_a_id} → Group {group_b_id} Port {port_b_id}")
             
             # IMPORTANT: The backend seems to use 1-based group IDs internally!
             # Add 1 to group IDs to match what the GUI uses
-            backend_group_a_id = group_a_id + 1
-            backend_group_b_id = group_b_id + 1
+            # TEMPORARILY DISABLED - testing if this is causing connection failures
+            # backend_group_a_id = group_a_id + 1
+            # backend_group_b_id = group_b_id + 1
+            backend_group_a_id = group_a_id
+            backend_group_b_id = group_b_id
             
             debug_info.append(f"Adjusted for backend: Group {backend_group_a_id} Port {port_a_id} → Group {backend_group_b_id} Port {port_b_id}")
             
@@ -472,7 +474,13 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             if success:
                 return f"✅ Connected {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}\n\nDebug:\n" + "\n".join(debug_info)
             else:
-                return f"❌ Failed to connect {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}\n\nDebug:\n" + "\n".join(debug_info)
+                # Get the actual Carla error message
+                carla_error = backend_bridge.get_last_patchbay_error()
+                error_msg = f"❌ Failed to connect {group_a_name}:{port_a_name} → {group_b_name}:{port_b_name}"
+                if carla_error:
+                    error_msg += f"\n\nCarla Error: {carla_error}"
+                error_msg += f"\n\nDebug:\n" + "\n".join(debug_info)
+                return error_msg
                 
         except Exception as e:
             return f"❌ Error connecting ports: {e}\n\nDebug:\n" + "\n".join(debug_info)
@@ -565,3 +573,193 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             
         except Exception as e:
             return f"❌ Error disconnecting connection: {e}"
+    
+    @mcp.tool()
+    def connect_patchbay_ports_batch(connections: List[Dict[str, str]]) -> str:
+        """
+        Connect multiple patchbay ports efficiently
+        
+        Args:
+            connections: List of connection dictionaries, each with:
+                        "group_a_name", "port_a_name", "group_b_name", "port_b_name"
+                        Example: [
+                            {
+                                "group_a_name": "Audio Input",
+                                "port_a_name": "Capture 2", 
+                                "group_b_name": "C* Noisegate - Attenuate noise resident in silence",
+                                "port_b_name": "Audio Input 1"
+                            },
+                            {
+                                "group_a_name": "C* Noisegate - Attenuate noise resident in silence",
+                                "port_a_name": "Audio Output 1",
+                                "group_b_name": "x42-comp - Dynamic Compressor Stereo", 
+                                "port_b_name": "Audio Input 1"
+                            }
+                        ]
+        
+        Returns:
+            JSON string with detailed results for each connection
+        """
+        if not backend_bridge:
+            return json.dumps({
+                "success": False,
+                "error": "Backend API not available",
+                "results": []
+            })
+        
+        # Check if in patchbay mode
+        try:
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
+                return json.dumps({
+                    "success": False,
+                    "error": "Port connections only work in patchbay mode. Use switch_to_patchbay_mode() first.",
+                    "results": []
+                })
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Failed to check engine mode: {e}",
+                "results": []
+            })
+        
+        # Validate input format
+        try:
+            for i, conn in enumerate(connections):
+                if not isinstance(conn, dict):
+                    return json.dumps({
+                        "success": False,
+                        "error": f"Invalid connection format at index {i}. Expected dict",
+                        "results": []
+                    })
+                
+                required_keys = ["group_a_name", "port_a_name", "group_b_name", "port_b_name"]
+                for key in required_keys:
+                    if key not in conn:
+                        return json.dumps({
+                            "success": False,
+                            "error": f"Missing '{key}' in connection at index {i}",
+                            "results": []
+                        })
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Error parsing connections: {e}",
+                "results": []
+            })
+        
+        # Get groups once for all connections (optimization)
+        try:
+            groups = backend_bridge.get_patchbay_groups()
+            group_map = {g['name'].lower(): g for g in groups}
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Failed to get patchbay groups: {e}",
+                "results": []
+            })
+        
+        # Execute batch connections
+        results = []
+        success_count = 0
+        errors = []
+        
+        for i, conn in enumerate(connections):
+            result = {
+                "index": i,
+                "connection": conn,
+                "success": False,
+                "error": None
+            }
+            
+            try:
+                # This reuses the existing single connection logic but without debug output
+                group_a_name = conn["group_a_name"]
+                port_a_name = conn["port_a_name"] 
+                group_b_name = conn["group_b_name"]
+                port_b_name = conn["port_b_name"]
+                
+                # Find groups
+                group_a = group_map.get(group_a_name.lower())
+                group_b = group_map.get(group_b_name.lower())
+                
+                if not group_a:
+                    result["error"] = f"Source group '{group_a_name}' not found"
+                elif not group_b:
+                    result["error"] = f"Destination group '{group_b_name}' not found"
+                else:
+                    # Calculate port IDs (reusing existing logic)
+                    import re
+                    def extract_port_number(port_name):
+                        match = re.search(r'(\d+)', port_name)
+                        return int(match.group(1)) - 1 if match else 0
+                    
+                    # Source port calculation
+                    port_index = extract_port_number(port_a_name)
+                    if group_a['type'] == 'audio_input':
+                        port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                    elif group_a['type'] == 'plugin':
+                        if any(x in port_a_name.lower() for x in ['output', 'out']):
+                            port_a_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                        else:
+                            port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                    else:
+                        port_a_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                    
+                    # Destination port calculation  
+                    port_index = extract_port_number(port_b_name)
+                    if group_b['type'] == 'audio_output':
+                        port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                    elif group_b['type'] == 'plugin':
+                        if any(x in port_b_name.lower() for x in ['input', 'in']):
+                            port_b_id = PATCHBAY_PORT_AUDIO_INPUT_OFFSET + port_index
+                        else:
+                            port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                    else:
+                        port_b_id = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + port_index
+                    
+                    # Connect with backend-adjusted group IDs
+                    backend_group_a_id = group_a['id'] + 1
+                    backend_group_b_id = group_b['id'] + 1
+                    
+                    success = backend_bridge.patchbay_connect(
+                        backend_group_a_id, port_a_id, 
+                        backend_group_b_id, port_b_id
+                    )
+                    
+                    if success:
+                        result["success"] = True
+                        success_count += 1
+                    else:
+                        # Get the actual Carla error message
+                        carla_error = backend_bridge.get_last_patchbay_error()
+                        if carla_error:
+                            result["error"] = f"Patchbay connect failed: {carla_error}"
+                        else:
+                            result["error"] = "Patchbay connect failed"
+                        
+            except Exception as e:
+                result["error"] = f"Exception during connection: {e}"
+                
+            if result["error"]:
+                errors.append(result["error"])
+            
+            results.append(result)
+        
+        # Format response
+        if success_count > 0:
+            return json.dumps({
+                "success": True,
+                "message": f"✅ Successfully connected {success_count}/{len(connections)} patchbay connections",
+                "success_count": success_count,
+                "total_count": len(connections),
+                "results": results,
+                "errors": errors if errors else None
+            }, indent=2)
+        else:
+            return json.dumps({
+                "success": False,
+                "message": f"❌ Failed to connect any of {len(connections)} patchbay connections",
+                "results": results,
+                "errors": errors
+            }, indent=2)

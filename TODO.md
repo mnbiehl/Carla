@@ -132,6 +132,11 @@ Carla MCP Server
 - [ ] **Test Parameter Control**: Verify plugin parameter get/set functionality works
 - [ ] **Test MIDI Functionality**: Ensure note on/off and control messages work
 - [ ] **Fix GUI Crashes**: Investigate plugin discovery crashes and improve robustness
+- [ ] **Add MCP Server Status to Carla UI**: Display MCP connection status, active connections, and server health in the GUI
+- [ ] **JSON Effects Chain Tool**: Create JSON representation of complete effects chains (plugins, parameters, connections, files) and MCP tool to deploy entire chains atomically
+  - Research Carla's `.carxp` project file format and leverage existing save/load infrastructure
+  - Integrate with Carla's native project system for compatibility and robustness
+- [ ] **Effects Chain Grouping System**: Add group ID/name system to differentiate and manage multiple input chains (guitar, bass, vocals, etc.) with proper chain identification and management
 
 ### Code Quality Improvements
 - [x] **Eliminate Constants Duplication**: Created single source of truth in constants.py module

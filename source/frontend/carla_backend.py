@@ -357,6 +357,9 @@ CUSTOM_DATA_TYPE_PROPERTY = "http://kxstudio.sf.net/ns/carla/property"
 # String type URI.
 CUSTOM_DATA_TYPE_STRING = "http://kxstudio.sf.net/ns/carla/string"
 
+# Path type URI.
+CUSTOM_DATA_TYPE_PATH = "http://kxstudio.sf.net/ns/carla/path"
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Custom Data Keys
 # Pre-defined keys used internally in Carla.

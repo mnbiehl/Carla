@@ -44,7 +44,51 @@ class CarlaBackendBridge:
         
         # Track patchbay connections
         self._patchbay_connections = {}
+        self._last_patchbay_error = ""
         
+    # --------------------------------------------------------------------------------------------------------
+    # Audio Monitoring
+    
+    def get_input_peak_value(self, plugin_id: int, is_left: bool) -> float:
+        """
+        Get the input peak value for a specific plugin and channel
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            is_left: True for left channel, False for right channel
+            
+        Returns:
+            Peak value as float (typically 0.0 to 1.0, can exceed 1.0 for clipping)
+        """
+        if not self.is_engine_running():
+            return 0.0
+            
+        try:
+            return float(self.host.get_input_peak_value(plugin_id, is_left))
+        except Exception as e:
+            self.logger.error(f"Error getting input peak value for plugin {plugin_id}: {e}")
+            return 0.0
+    
+    def get_output_peak_value(self, plugin_id: int, is_left: bool) -> float:
+        """
+        Get the output peak value for a specific plugin and channel
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            is_left: True for left channel, False for right channel
+            
+        Returns:
+            Peak value as float (typically 0.0 to 1.0, can exceed 1.0 for clipping)
+        """
+        if not self.is_engine_running():
+            return 0.0
+            
+        try:
+            return float(self.host.get_output_peak_value(plugin_id, is_left))
+        except Exception as e:
+            self.logger.error(f"Error getting output peak value for plugin {plugin_id}: {e}")
+            return 0.0
+    
     # --------------------------------------------------------------------------------------------------------
     # Connection & Engine Status
     
@@ -390,6 +434,233 @@ class CarlaBackendBridge:
             self.logger.error(f"Error getting parameter {parameter_id} on plugin {plugin_id}: {e}")
             return None
     
+    def get_parameter_count(self, plugin_id: int) -> int:
+        """Get number of parameters for a plugin"""
+        try:
+            return self.host.get_parameter_count(plugin_id)
+        except Exception as e:
+            self.logger.error(f"Error getting parameter count for plugin {plugin_id}: {e}")
+            return 0
+    
+    def get_parameter_info(self, plugin_id: int, parameter_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information about a specific parameter"""
+        try:
+            info = self.host.get_parameter_info(plugin_id, parameter_id)
+            if info:
+                return {
+                    "name": info['name'],
+                    "symbol": info.get('symbol', ''),
+                    "unit": info.get('unit', ''),
+                    "comment": info.get('comment', ''),
+                    "groupName": info.get('groupName', ''),
+                    "scalePointCount": info.get('scalePointCount', 0)
+                }
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting parameter info for plugin {plugin_id}, param {parameter_id}: {e}")
+            return None
+    
+    def get_parameter_data(self, plugin_id: int, parameter_id: int) -> Optional[Dict[str, Any]]:
+        """Get parameter data including current value and ranges"""
+        try:
+            data = self.host.get_parameter_data(plugin_id, parameter_id)
+            if data:
+                return {
+                    "type": data['type'],
+                    "hints": data['hints'],
+                    "midiChannel": data['midiChannel'],
+                    "mappedControlIndex": data['mappedControlIndex'],
+                    "mappedMinimum": data['mappedMinimum'],
+                    "mappedMaximum": data['mappedMaximum'],
+                    "mappedMinimumStr": data.get('mappedMinimumStr', ''),
+                    "mappedMaximumStr": data.get('mappedMaximumStr', '')
+                }
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting parameter data for plugin {plugin_id}, param {parameter_id}: {e}")
+            return None
+    
+    def get_parameter_ranges(self, plugin_id: int, parameter_id: int) -> Optional[Dict[str, float]]:
+        """Get parameter ranges (min, max, default, current)"""
+        try:
+            ranges = self.host.get_parameter_ranges(plugin_id, parameter_id)
+            if ranges:
+                return {
+                    "minimum": ranges['minimum'],
+                    "maximum": ranges['maximum'], 
+                    "default": ranges['default'],
+                    "step": ranges['step'],
+                    "stepSmall": ranges['stepSmall'],
+                    "stepLarge": ranges['stepLarge']
+                }
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting parameter ranges for plugin {plugin_id}, param {parameter_id}: {e}")
+            return None
+    
+    def get_all_parameter_details(self, plugin_id: int) -> List[Dict[str, Any]]:
+        """Get all parameter details for a plugin"""
+        parameters = []
+        param_count = self.get_parameter_count(plugin_id)
+        
+        for i in range(param_count):
+            try:
+                param = {
+                    "id": i,
+                    "value": self.get_parameter_value(plugin_id, i)
+                }
+                
+                # Get parameter info
+                info = self.get_parameter_info(plugin_id, i)
+                if info:
+                    param.update(info)
+                
+                # Get parameter ranges
+                ranges = self.get_parameter_ranges(plugin_id, i)
+                if ranges:
+                    param["ranges"] = ranges
+                
+                # Get parameter data
+                data = self.get_parameter_data(plugin_id, i)
+                if data:
+                    param["data"] = data
+                    
+                parameters.append(param)
+            except Exception as e:
+                self.logger.error(f"Error getting details for parameter {i}: {e}")
+                
+        return parameters
+    
+    # --------------------------------------------------------------------------------------------------------
+    # Batch Parameter Operations
+    
+    def set_parameters_batch(self, plugin_id: int, param_changes: List[tuple]) -> Dict[str, Any]:
+        """
+        Set multiple parameters for a single plugin efficiently
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            param_changes: List of (parameter_id, value) tuples
+            
+        Returns:
+            Dict with success count, results, and errors
+        """
+        if not self.is_engine_running():
+            return {
+                "success": False,
+                "error": "Engine not running",
+                "results": [],
+                "success_count": 0
+            }
+        
+        results = []
+        success_count = 0
+        errors = []
+        
+        # Validate plugin exists first
+        try:
+            plugin_count = self.host.get_current_plugin_count()
+            if plugin_id >= plugin_count:
+                return {
+                    "success": False,
+                    "error": f"Plugin {plugin_id} does not exist (max: {plugin_count-1})",
+                    "results": [],
+                    "success_count": 0
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to validate plugin: {e}",
+                "results": [],
+                "success_count": 0
+            }
+        
+        # Get parameter count for validation
+        param_count = self.get_parameter_count(plugin_id)
+        
+        # Execute batch parameter changes
+        for i, (param_id, value) in enumerate(param_changes):
+            result = {
+                "index": i,
+                "param_id": param_id,
+                "value": value,
+                "success": False,
+                "error": None
+            }
+            
+            try:
+                # Validate parameter ID
+                if param_id >= param_count:
+                    result["error"] = f"Parameter {param_id} does not exist (max: {param_count-1})"
+                    errors.append(result["error"])
+                else:
+                    # Set the parameter
+                    self.host.set_parameter_value(plugin_id, param_id, value)
+                    result["success"] = True
+                    success_count += 1
+                    
+            except Exception as e:
+                error_msg = f"Failed to set param {param_id}: {e}"
+                result["error"] = error_msg
+                errors.append(error_msg)
+                self.logger.error(f"Batch parameter error for plugin {plugin_id}, param {param_id}: {e}")
+            
+            results.append(result)
+        
+        return {
+            "success": success_count > 0,
+            "success_count": success_count,
+            "total_count": len(param_changes),
+            "results": results,
+            "errors": errors
+        }
+    
+    def set_multiple_plugin_parameters(self, changes: List[Dict]) -> Dict[str, Any]:
+        """
+        Set parameters across multiple plugins efficiently
+        
+        Args:
+            changes: List of {"plugin_id": int, "param_id": int, "value": float} dicts
+            
+        Returns:
+            Dict with success count, results grouped by plugin, and errors
+        """
+        if not self.is_engine_running():
+            return {
+                "success": False,
+                "error": "Engine not running",
+                "results": {},
+                "success_count": 0
+            }
+        
+        # Group changes by plugin for efficiency
+        grouped_changes = {}
+        for change in changes:
+            plugin_id = change["plugin_id"]
+            if plugin_id not in grouped_changes:
+                grouped_changes[plugin_id] = []
+            grouped_changes[plugin_id].append((change["param_id"], change["value"]))
+        
+        results = {}
+        total_success = 0
+        all_errors = []
+        
+        # Process each plugin's parameters as a batch
+        for plugin_id, param_changes in grouped_changes.items():
+            plugin_result = self.set_parameters_batch(plugin_id, param_changes)
+            results[str(plugin_id)] = plugin_result
+            total_success += plugin_result["success_count"]
+            all_errors.extend(plugin_result["errors"])
+        
+        return {
+            "success": total_success > 0,
+            "success_count": total_success,
+            "total_count": len(changes),
+            "results": results,
+            "errors": all_errors,
+            "plugins_affected": len(grouped_changes)
+        }
+    
     # --------------------------------------------------------------------------------------------------------
     # MIDI Control
     
@@ -528,11 +799,29 @@ class CarlaBackendBridge:
                 }
                 return True
             else:
-                self.logger.error(f"✗ Failed to connect ports: {group_a}:{port_a} -> {group_b}:{port_b}")
+                # Get the actual Carla error message
+                carla_error = "Unknown error"
+                try:
+                    carla_error = self.host.get_last_error()
+                except:
+                    pass
+                
+                error_msg = f"✗ Failed to connect ports: {group_a}:{port_a} -> {group_b}:{port_b}"
+                if carla_error:
+                    error_msg += f" - Carla error: {carla_error}"
+                    
+                self.logger.error(error_msg)
+                # Store the error so tools can access it
+                self._last_patchbay_error = carla_error
                 return False
         except Exception as e:
             self.logger.error(f"✗ Error connecting ports {group_a}:{port_a} -> {group_b}:{port_b}: {e}")
+            self._last_patchbay_error = str(e)
             return False
+    
+    def get_last_patchbay_error(self) -> str:
+        """Get the last patchbay connection error message"""
+        return self._last_patchbay_error
     
     def patchbay_disconnect(self, connection_id: int) -> bool:
         """
@@ -730,6 +1019,171 @@ class CarlaBackendBridge:
         except Exception as e:
             self.logger.error(f"Error getting patchbay groups: {e}")
             return []
+    
+    # --------------------------------------------------------------------------------------------------------
+    # Session Management
+    
+    def load_project(self, filename: str) -> bool:
+        """
+        Load a Carla project file (.carxp)
+        
+        Args:
+            filename: Path to the project file
+            
+        Returns:
+            True if project was loaded successfully
+        """
+        if not self.is_engine_running():
+            self.logger.error("Cannot load project: engine not running")
+            return False
+            
+        try:
+            success = self.host.load_project(filename)
+            if success:
+                self.logger.info(f"Successfully loaded project: {filename}")
+            else:
+                self.logger.error(f"Failed to load project: {filename}")
+            return success
+        except Exception as e:
+            self.logger.error(f"Error loading project {filename}: {e}")
+            return False
+    
+    def save_project(self, filename: str) -> bool:
+        """
+        Save current state as a Carla project file (.carxp)
+        
+        Args:
+            filename: Path where to save the project file
+            
+        Returns:
+            True if project was saved successfully
+        """
+        if not self.is_engine_running():
+            self.logger.error("Cannot save project: engine not running")
+            return False
+            
+        try:
+            success = self.host.save_project(filename)
+            if success:
+                self.logger.info(f"Successfully saved project: {filename}")
+            else:
+                self.logger.error(f"Failed to save project: {filename}")
+            return success
+        except Exception as e:
+            self.logger.error(f"Error saving project {filename}: {e}")
+            return False
+    
+    def get_current_project_filename(self) -> Optional[str]:
+        """
+        Get the filename of the currently loaded project
+        
+        Returns:
+            Current project filename or None
+        """
+        try:
+            filename = self.host.get_current_project_filename()
+            return filename if filename else None
+        except Exception as e:
+            self.logger.error(f"Error getting current project filename: {e}")
+            return None
+    
+    def clear_project_filename(self) -> bool:
+        """
+        Clear the current project filename (mark as unsaved)
+        
+        Returns:
+            True if successful
+        """
+        try:
+            self.host.clear_project_filename()
+            return True
+        except Exception as e:
+            self.logger.error(f"Error clearing project filename: {e}")
+            return False
+    
+    def load_plugin_state(self, plugin_id: int, filename: str) -> bool:
+        """
+        Load a plugin state from file (.carxs)
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            filename: Path to the state file
+            
+        Returns:
+            True if state was loaded successfully
+        """
+        try:
+            success = self.host.load_plugin_state(plugin_id, filename)
+            if success:
+                self.logger.info(f"Successfully loaded plugin {plugin_id} state from: {filename}")
+            else:
+                self.logger.error(f"Failed to load plugin {plugin_id} state from: {filename}")
+            return success
+        except Exception as e:
+            self.logger.error(f"Error loading plugin {plugin_id} state: {e}")
+            return False
+    
+    def save_plugin_state(self, plugin_id: int, filename: str) -> bool:
+        """
+        Save a plugin state to file (.carxs)
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            filename: Path where to save the state file
+            
+        Returns:
+            True if state was saved successfully
+        """
+        try:
+            success = self.host.save_plugin_state(plugin_id, filename)
+            if success:
+                self.logger.info(f"Successfully saved plugin {plugin_id} state to: {filename}")
+            else:
+                self.logger.error(f"Failed to save plugin {plugin_id} state to: {filename}")
+            return success
+        except Exception as e:
+            self.logger.error(f"Error saving plugin {plugin_id} state: {e}")
+            return False
+    
+    def set_custom_data(self, plugin_id: int, type_: str, key: str, value: str) -> bool:
+        """
+        Set custom data for a plugin
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            type_: Custom data type (e.g. CUSTOM_DATA_TYPE_PATH)
+            key: Custom data key (e.g. "file")
+            value: Custom data value (e.g. file path)
+            
+        Returns:
+            True if custom data was set successfully
+        """
+        try:
+            self.host.set_custom_data(plugin_id, type_, key, value)
+            self.logger.info(f"Successfully set custom data for plugin {plugin_id}: {type_}:{key} = {value}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error setting custom data for plugin {plugin_id}: {e}")
+            return False
+    
+    def get_custom_data_value(self, plugin_id: int, type_: str, key: str) -> Optional[str]:
+        """
+        Get custom data value for a plugin
+        
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            type_: Custom data type (e.g. CUSTOM_DATA_TYPE_PATH)
+            key: Custom data key (e.g. "file")
+            
+        Returns:
+            Custom data value if found, None otherwise
+        """
+        try:
+            value = self.host.get_custom_data_value(plugin_id, type_, key)
+            return value if value else None
+        except Exception as e:
+            self.logger.error(f"Error getting custom data for plugin {plugin_id}: {e}")
+            return None
     
     # --------------------------------------------------------------------------------------------------------
     # Resource Management and Cleanup

@@ -6,11 +6,13 @@ plus comprehensive plugin discovery capabilities.
 """
 
 import json
+import os
 from typing import Union, Optional
 from fastmcp import FastMCP
 from ..backend.backend_bridge import CarlaBackendBridge
 from ..discovery.plugin_discoverer import PluginDiscoverer
 from ..utils.error_handler import get_error_handler
+from carla_backend import CUSTOM_DATA_TYPE_PATH
 
 # Global instances - will be initialized in main.py
 backend_bridge: CarlaBackendBridge = None
@@ -60,6 +62,41 @@ def register_plugin_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             return f"✅ Set plugin {plugin_id} volume to {volume:.2f}"
         else:
             return f"❌ Failed to set plugin {plugin_id} volume"
+    
+    @mcp.tool()
+    def get_plugin_parameters(plugin_id: int) -> str:
+        """
+        Get all parameter details for a plugin
+        
+        Args:
+            plugin_id: The ID of the plugin (0-based index)
+            
+        Returns:
+            JSON string with parameter names, values, and ranges
+        """
+        if not backend_bridge:
+            return "❌ Backend bridge not available"
+        
+        try:
+            # Get plugin info first
+            plugin_info = backend_bridge.get_plugin_info(plugin_id)
+            if not plugin_info:
+                return f"❌ Plugin {plugin_id} not found"
+            
+            # Get all parameter details
+            parameters = backend_bridge.get_all_parameter_details(plugin_id)
+            
+            result = {
+                'plugin_id': plugin_id,
+                'plugin_name': plugin_info.get('name', 'Unknown'),
+                'parameter_count': len(parameters),
+                'parameters': parameters
+            }
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as e:
+            return f"❌ Error getting plugin parameters: {e}"
     
     @mcp.tool()
     def list_loaded_plugins() -> str:
@@ -258,6 +295,49 @@ def register_plugin_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             
         except Exception as e:
             return f"❌ Error getting plugin info for {plugin_id}: {e}"
+    
+    @mcp.tool()
+    def set_plugin_file(plugin_id: int, file_path: str) -> str:
+        """
+        Set a file path for a plugin (e.g., NAM model, IR file)
+        
+        This uses Carla's custom data API to set file paths for plugins
+        that support loading external files.
+        
+        Args:
+            plugin_id: ID of the plugin (0-based index)
+            file_path: Path to the file to load
+            
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available"
+        
+        try:
+            # Validate file exists
+            if not os.path.exists(file_path):
+                return f"❌ File not found: {file_path}"
+            
+            # Get plugin info for better feedback
+            plugin_info = backend_bridge.get_plugin_info(plugin_id)
+            plugin_name = plugin_info.get('name', f'Plugin {plugin_id}') if plugin_info else f'Plugin {plugin_id}'
+            
+            # Set the file path using custom data
+            success = backend_bridge.set_custom_data(
+                plugin_id, 
+                CUSTOM_DATA_TYPE_PATH,
+                "file",
+                file_path
+            )
+            
+            if success:
+                return f"✅ Set file for {plugin_name}: {file_path}"
+            else:
+                return f"❌ Failed to set file for {plugin_name}"
+                
+        except Exception as e:
+            return f"❌ Error setting file for plugin {plugin_id}: {e}"
     
     # ============================================================================
     # Plugin Discovery Tools
