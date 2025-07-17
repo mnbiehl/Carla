@@ -26,9 +26,6 @@ Looper Track (stereo L/R) → JACK → Carla Input (mono) → Plugin Effects →
 - **External JACK connections**: Use `jack_connect` CLI commands for looper → Carla
 - **Internal Carla connections**: Use MCP patchbay tools for plugin routing
 
-### 4. Important: Group ID Offset
-The Carla backend uses 1-based group IDs internally, while the MCP API shows 0-based IDs. The MCP tools handle this automatically.
-
 ## Standard Workflow: Processing Looper Tracks
 
 ### Step 1: Ensure Patchbay Mode (Should Already Be Active)

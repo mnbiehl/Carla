@@ -460,13 +460,18 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             
             debug_info.append(f"\nFinal connection: Group {group_a_id} Port {port_a_id} → Group {group_b_id} Port {port_b_id}")
             
-            # IMPORTANT: The backend seems to use 1-based group IDs internally!
-            # Add 1 to group IDs to match what the GUI uses
-            # TEMPORARILY DISABLED - testing if this is causing connection failures
-            # backend_group_a_id = group_a_id + 1
-            # backend_group_b_id = group_b_id + 1
+            # IMPORTANT: The backend seems to use different group IDs than what the API reports!
+            # Based on working connections, plugins use IDs like 27, 28, etc.
+            # Try to map the API group IDs to the actual backend group IDs
+            
+            # Use original group IDs since they're working in recent connections
+            debug_info.append(f"Source group type: {source_group['type'] if source_group else 'None'}")
+            debug_info.append(f"Dest group type: {dest_group['type'] if dest_group else 'None'}")
+            
             backend_group_a_id = group_a_id
             backend_group_b_id = group_b_id
+            
+            debug_info.append(f"Using original group IDs: {group_a_id} → {group_b_id}")
             
             debug_info.append(f"Adjusted for backend: Group {backend_group_a_id} Port {port_a_id} → Group {backend_group_b_id} Port {port_b_id}")
             
@@ -763,3 +768,71 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                 "results": results,
                 "errors": errors
             }, indent=2)
+    
+    @mcp.tool()
+    def test_direct_patchbay_connect(group_a: int, port_a: int, group_b: int, port_b: int) -> str:
+        """
+        Test direct backend patchbay connection with raw port numbers
+        
+        This bypasses all the port name resolution and group mapping logic
+        and calls the patchbay_connect function directly with raw port numbers.
+        
+        Args:
+            group_a: Source group ID (raw number)
+            port_a: Source port ID (raw number)
+            group_b: Destination group ID (raw number)
+            port_b: Destination port ID (raw number)
+            
+        Returns:
+            Status message with detailed information
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        
+        try:
+            # Check if engine is running
+            if not backend_bridge.is_engine_running():
+                return "❌ Engine is not running - cannot test patchbay connection"
+            
+            # Check if in patchbay mode
+            current_mode = backend_bridge.get_engine_process_mode()
+            if current_mode != 3:  # ENGINE_PROCESS_MODE_PATCHBAY
+                return f"❌ Engine not in patchbay mode (current mode: {current_mode}). Use switch_to_patchbay_mode() first."
+            
+            # Get current groups for reference
+            groups = backend_bridge.get_patchbay_groups()
+            debug_info = []
+            debug_info.append(f"=== DIRECT PATCHBAY CONNECTION TEST ===")
+            debug_info.append(f"Testing: Group {group_a} Port {port_a} → Group {group_b} Port {port_b}")
+            debug_info.append(f"Available groups: {len(groups)}")
+            
+            for group in groups:
+                debug_info.append(f"  Group {group['id']}: {group['name']} (type: {group.get('type', 'unknown')})")
+            
+            # Test the direct connection
+            debug_info.append(f"\nCalling backend_bridge.patchbay_connect({group_a}, {port_a}, {group_b}, {port_b})")
+            
+            success = backend_bridge.patchbay_connect(group_a, port_a, group_b, port_b)
+            
+            if success:
+                debug_info.append("✓ SUCCESS: Direct patchbay connection worked!")
+                
+                # Show current connections
+                connections = backend_bridge.get_patchbay_connections()
+                debug_info.append(f"\nCurrent connections: {len(connections)}")
+                for conn in connections:
+                    debug_info.append(f"  Connection {conn['id']}: Group {conn['group_a']} Port {conn['port_a']} → Group {conn['group_b']} Port {conn['port_b']}")
+                
+                return "\n".join(debug_info)
+            else:
+                debug_info.append("✗ FAILED: Direct patchbay connection failed")
+                
+                # Get error details
+                error = backend_bridge.get_last_patchbay_error()
+                if error:
+                    debug_info.append(f"Carla error: {error}")
+                
+                return "\n".join(debug_info)
+                
+        except Exception as e:
+            return f"❌ Exception during test: {e}"
