@@ -783,6 +783,7 @@ target_sources(carla-bridge-native
     ../source/backend/engine/CarlaEngineDummy.cpp
     ../source/backend/engine/CarlaEngineData.cpp
     ../source/backend/engine/CarlaEngineGraph.cpp
+    ../source/backend/engine/CarlaEngineGraphParallel.cpp
     ../source/backend/engine/CarlaEngineInternal.cpp
     ../source/backend/engine/CarlaEnginePorts.cpp
     ../source/backend/engine/CarlaEngineRunner.cpp
@@ -1009,6 +1010,7 @@ target_sources(carla-host-plugin
     ../source/backend/engine/CarlaEngineClient.cpp
     ../source/backend/engine/CarlaEngineData.cpp
     ../source/backend/engine/CarlaEngineGraph.cpp
+    ../source/backend/engine/CarlaEngineGraphParallel.cpp
     ../source/backend/engine/CarlaEngineInternal.cpp
     ../source/backend/engine/CarlaEngineNative.cpp
     ../source/backend/engine/CarlaEngineOsc.cpp
@@ -1175,6 +1177,7 @@ target_sources(carla-native-plugin
     ../source/backend/engine/CarlaEngineClient.cpp
     ../source/backend/engine/CarlaEngineData.cpp
     ../source/backend/engine/CarlaEngineGraph.cpp
+    ../source/backend/engine/CarlaEngineGraphParallel.cpp
     ../source/backend/engine/CarlaEngineInternal.cpp
     ../source/backend/engine/CarlaEngineNative.cpp
     ../source/backend/engine/CarlaEngineOsc.cpp
@@ -1306,6 +1309,7 @@ target_sources(carla-standalone
     ../source/backend/engine/CarlaEngineDummy.cpp
     ../source/backend/engine/CarlaEngineData.cpp
     ../source/backend/engine/CarlaEngineGraph.cpp
+    ../source/backend/engine/CarlaEngineGraphParallel.cpp
     ../source/backend/engine/CarlaEngineInternal.cpp
     ../source/backend/engine/CarlaEngineNative.cpp
     ../source/backend/engine/CarlaEngineOsc.cpp
