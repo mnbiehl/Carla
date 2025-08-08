@@ -229,6 +229,7 @@ struct CARLA_API EngineOptions {
     bool preferUiBridges;
     bool uisAlwaysOnTop;
     bool pluginsAreStandalone;
+    bool parallelProcessing;
     uint bgColor;
     uint fgColor;
     float uiScale;

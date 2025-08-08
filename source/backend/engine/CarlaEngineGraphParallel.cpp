@@ -147,7 +147,7 @@ void ParallelRackGraph::processParallel(CarlaEngine* engine,
                                        const float* inBuf[], 
                                        float* outBuf[], 
                                        const uint32_t frames,
-                                       const uint32_t channels)
+                                       const uint32_t /*channels*/)
 {
     CARLA_SAFE_ASSERT_RETURN(engine != nullptr,);
     

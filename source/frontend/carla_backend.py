@@ -1029,6 +1029,9 @@ ENGINE_OPTION_CLIENT_NAME_PREFIX = 34
 # Treat loaded plugins as standalone (that is, there is no host UI to manage them)
 ENGINE_OPTION_PLUGINS_ARE_STANDALONE = 35
 
+# Enable parallel processing of plugins in rack mode
+ENGINE_OPTION_PARALLEL_PROCESSING = 36
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Engine Process Mode
 # Engine process mode.

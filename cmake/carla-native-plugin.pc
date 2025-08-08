@@ -1,0 +1,9 @@
+prefix=/usr/local
+libdir=/usr/local/lib
+includedir=/usr/local/include
+
+Name: carla-native-plugin
+Version: 2.6.0-alpha1
+Description: Carla Native Plugin
+Libs: -Wl,-rpath,${libdir}/carla -L${libdir}/carla -lcarla_native-plugin
+Cflags: -I${includedir}/carla -I${includedir}/carla/includes

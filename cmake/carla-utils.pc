@@ -1,0 +1,9 @@
+prefix=/usr/local
+libdir=/usr/local/lib
+includedir=/usr/local/include
+
+Name: carla-utils
+Version: 2.6.0-alpha1
+Description: Carla Host Utilities
+Libs: -Wl,-rpath,${libdir}/carla -L${libdir}/carla -lcarla_utils
+Cflags: -I${includedir}/carla -I${includedir}/carla/includes -I${includedir}/carla/utils

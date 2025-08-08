@@ -1550,7 +1550,17 @@ typedef enum {
     /*!
      * Treat loaded plugins as standalone (that is, there is no host UI to manage them)
      */
-    ENGINE_OPTION_PLUGINS_ARE_STANDALONE = 35
+    ENGINE_OPTION_PLUGINS_ARE_STANDALONE = 35,
+
+    /*!
+     * Enable parallel processing of plugins in rack mode.
+     * When enabled, plugins will be processed in parallel threads instead of sequentially.
+     * This can improve performance on multi-core systems, especially with CPU-heavy plugins.
+     * Default is false.
+     * @note Only works in ENGINE_PROCESS_MODE_CONTINUOUS_RACK mode
+     * @note Experimental feature - may not work with all plugin combinations
+     */
+    ENGINE_OPTION_PARALLEL_PROCESSING = 36
 
 } EngineOption;
 

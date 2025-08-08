@@ -1840,6 +1840,7 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
         case ENGINE_OPTION_AUDIO_TRIPLE_BUFFER:
         case ENGINE_OPTION_AUDIO_DRIVER:
         case ENGINE_OPTION_AUDIO_DEVICE:
+        case ENGINE_OPTION_PARALLEL_PROCESSING:
             return carla_stderr("CarlaEngine::setOption(%i:%s, %i, \"%s\") - Cannot set this option while engine is running!",
                                 option, EngineOption2Str(option), value, valueStr);
         default:
@@ -2197,6 +2198,20 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
     case ENGINE_OPTION_PLUGINS_ARE_STANDALONE:
         CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
         pData->options.pluginsAreStandalone = (value != 0);
+        break;
+
+    case ENGINE_OPTION_PARALLEL_PROCESSING:
+        CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
+        // Only allow in rack mode
+        if (pData->options.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK)
+        {
+            pData->options.parallelProcessing = (value != 0);
+        }
+        else
+        {
+            carla_stderr("CarlaEngine::setOption(%i:%s, %i, \"%s\") - Parallel processing only works in rack mode",
+                        option, EngineOption2Str(option), value, valueStr);
+        }
         break;
     }
 }

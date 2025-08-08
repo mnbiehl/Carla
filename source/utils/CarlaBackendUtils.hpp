@@ -415,6 +415,8 @@ const char* EngineOption2Str(const EngineOption option) noexcept
         return "ENGINE_OPTION_CLIENT_NAME_PREFIX";
     case ENGINE_OPTION_PLUGINS_ARE_STANDALONE:
         return "ENGINE_OPTION_PLUGINS_ARE_STANDALONE";
+    case ENGINE_OPTION_PARALLEL_PROCESSING:
+        return "ENGINE_OPTION_PARALLEL_PROCESSING";
     }
 
     carla_stderr("CarlaBackend::EngineOption2Str(%i) - invalid option", option);

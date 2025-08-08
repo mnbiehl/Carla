@@ -210,6 +210,7 @@ EngineOptions::EngineOptions() noexcept
 #endif
       uisAlwaysOnTop(true),
       pluginsAreStandalone(false),
+      parallelProcessing(false),
       bgColor(0x000000ff),
       fgColor(0xffffffff),
       uiScale(1.0f),
