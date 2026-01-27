@@ -6,7 +6,7 @@ doesn't have to deal with internal IDs.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 
 @dataclass
@@ -33,3 +33,23 @@ class StateManager:
     def list_aliases(self) -> Dict[str, str]:
         """Return all aliases."""
         return dict(self.aliases)
+
+    def add_connection(self, source: str, destination: str) -> None:
+        """Record a connection between source and destination."""
+        self.connections.add((source, destination))
+
+    def remove_connection(self, source: str, destination: str) -> None:
+        """Remove a connection."""
+        self.connections.discard((source, destination))
+
+    def list_connections(self) -> List[Tuple[str, str]]:
+        """Return all connections as list of (source, dest) tuples."""
+        return list(self.connections)
+
+    def get_connections_from(self, source: str) -> List[str]:
+        """Get all destinations connected from a source."""
+        return [dest for src, dest in self.connections if src == source]
+
+    def get_connections_to(self, destination: str) -> List[str]:
+        """Get all sources connected to a destination."""
+        return [src for src, dest in self.connections if dest == destination]
