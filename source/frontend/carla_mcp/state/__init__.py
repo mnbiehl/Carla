@@ -5,6 +5,7 @@ from .stereo import is_stereo_pair, get_stereo_pair, get_channel_type, split_ste
 from .name_matcher import NameMatcher, MatchResult
 from .chain import Chain
 from .instance_manager import CarlaInstance, InstanceManager
+from .jack_discovery import JackDiscovery, PortInfo
 
 __all__ = [
     "StateManager",
@@ -17,4 +18,6 @@ __all__ = [
     "Chain",
     "CarlaInstance",
     "InstanceManager",
+    "JackDiscovery",
+    "PortInfo",
 ]
