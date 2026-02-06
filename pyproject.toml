@@ -1,27 +1,30 @@
-[tool.poetry]
+[project]
 name = "carla-mcp"
 version = "0.2.0"
 description = "MCP server for comprehensive Carla audio plugin host control"
-authors = ["Michael Biehl"]
 readme = "README.md"
-packages = [{include = "carla_mcp", from = "source/frontend"}]
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.10.0",
+    "python-osc>=1.7.1",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-fastmcp = ">=2.10.0"
-python-osc = ">=1.7.1"
-pyqt5 = "^5.15.11"
+[project.scripts]
+start = "carla_mcp.main:main"
+carla-mcp = "carla_mcp.main:main"
 
-[tool.poetry.group.dev.dependencies]
-pytest = ">=7.0.0"
-black = ">=22.0.0"
-flake8 = ">=4.0.0"
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+]
 
-[tool.poetry.scripts]
-start = "source.frontend.carla_mcp.main:main"
-carla-mcp = "source.frontend.carla_mcp.main:main"
-carla = "carla_launcher:main"
+[tool.pytest.ini_options]
+testpaths = ["source/frontend/carla_mcp/tests"]
+pythonpath = ["source/frontend"]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["source/frontend/carla_mcp"]

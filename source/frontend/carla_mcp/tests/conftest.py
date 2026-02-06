@@ -3,6 +3,9 @@
 import pytest
 from unittest.mock import Mock, MagicMock
 
+# Avoid importing the full carla_mcp package which may have dependency issues
+# Tests should import specific modules directly instead
+
 
 @pytest.fixture
 def mock_jack_client():
