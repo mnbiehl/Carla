@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Add Carla path to system path
 CARLA_PATH = "/usr/share/carla"
 if CARLA_PATH not in sys.path:
-    sys.path.insert(0, CARLA_PATH)
+    sys.path.append(CARLA_PATH)
 
 try:
     from carla_backend import CarlaHostDLL

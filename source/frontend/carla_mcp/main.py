@@ -207,6 +207,11 @@ def setup_patchbay_callbacks(carla_host_instance):
             if backend_bridge:
                 backend_bridge.unregister_connection(connection_id)
         
+        def on_patchbay_client_added(client_id, client_icon, plugin_id, client_name):
+            logger.info(f"Patchbay client added: ID={client_id}, Plugin={plugin_id}, Name={client_name}")
+            if backend_bridge:
+                backend_bridge.register_patchbay_client(client_id, client_icon, plugin_id, client_name)
+        
         # Connect the callbacks
         if hasattr(carla_host_instance, 'PatchbayConnectionAddedCallback'):
             carla_host_instance.PatchbayConnectionAddedCallback.connect(on_connection_added)
@@ -219,6 +224,12 @@ def setup_patchbay_callbacks(carla_host_instance):
             logger.info("Connected to PatchbayConnectionRemovedCallback")
         else:
             logger.warning("PatchbayConnectionRemovedCallback not found on host instance")
+            
+        if hasattr(carla_host_instance, 'PatchbayClientAddedCallback'):
+            carla_host_instance.PatchbayClientAddedCallback.connect(on_patchbay_client_added)
+            logger.info("Connected to PatchbayClientAddedCallback")
+        else:
+            logger.warning("PatchbayClientAddedCallback not found on host instance")
             
     except Exception as e:
         logger.error(f"Failed to set up patchbay callbacks: {e}")

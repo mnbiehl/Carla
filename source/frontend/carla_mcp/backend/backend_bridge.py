@@ -46,6 +46,10 @@ class CarlaBackendBridge:
         self._patchbay_connections = {}
         self._last_patchbay_error = ""
         
+        # Track real backend group IDs for plugins
+        self._plugin_to_group_map = {}  # Maps plugin_id -> backend_group_id
+        self._group_to_plugin_map = {}  # Maps backend_group_id -> plugin_id
+        
     # --------------------------------------------------------------------------------------------------------
     # Audio Monitoring
     
@@ -901,6 +905,16 @@ class CarlaBackendBridge:
             del self._patchbay_connections[connection_id]
             self.logger.info(f"Unregistered connection {connection_id}")
     
+    def register_patchbay_client(self, client_id: int, client_icon: int, plugin_id: int, client_name: str):
+        """
+        Track when a plugin gets a patchbay group ID assigned
+        Called from PatchbayClientAddedCallback
+        """
+        self.logger.info(f"Patchbay client added: {client_name} (plugin {plugin_id}) -> group {client_id}")
+        if plugin_id >= 0:  # Valid plugin ID
+            self._plugin_to_group_map[plugin_id] = client_id
+            self._group_to_plugin_map[client_id] = plugin_id
+    
     def patchbay_refresh(self) -> bool:
         """
         Refresh patchbay state
@@ -933,38 +947,38 @@ class CarlaBackendBridge:
             # Get current plugin count to iterate through plugin groups
             plugin_count = self.get_plugin_count()
             
-            # Group IDs in Carla patchbay:
-            # 0 = Audio Input group
-            # 1 = Audio Output group  
-            # 2 = Midi Input group
-            # 3 = Midi Output group
-            # 4+ = Plugin groups
-            
-            # Add Audio Input group
-            groups.append({
-                'id': 0,
-                'name': 'Audio Input',
-                'type': 'audio_input',
-                'port_count': 16,  # Carla typically has 16 audio inputs
-                'ports': {
-                    'outputs': [f'Capture {i+1}' for i in range(16)]  # Audio inputs have outputs in patchbay
-                }
-            })
-            
-            # Add Audio Output group
+            # Group IDs in Carla patchbay (confirmed by inspecting live connections):
+            # 1 = Audio Input group (captures - output ports in patchbay)
+            # 2 = Audio Output group (playbacks - input ports in patchbay)
+            # 3 = Midi Input group
+            # 4 = Midi Output group
+            # 5+ = Plugin groups
+
+            # Add Audio Input group (system captures)
             groups.append({
                 'id': 1,
-                'name': 'Audio Output',
-                'type': 'audio_output',
-                'port_count': 16,  # Carla typically has 16 audio outputs
+                'name': 'Audio Input',
+                'type': 'audio_input',
+                'port_count': 16,
                 'ports': {
-                    'inputs': [f'Playback {i+1}' for i in range(16)]  # Audio outputs have inputs in patchbay
+                    'outputs': [f'Capture {i+1}' for i in range(16)]
                 }
             })
-            
-            # Add Midi Input group
+
+            # Add Audio Output group (system playbacks)
             groups.append({
                 'id': 2,
+                'name': 'Audio Output',
+                'type': 'audio_output',
+                'port_count': 16,
+                'ports': {
+                    'inputs': [f'Playback {i+1}' for i in range(16)]
+                }
+            })
+
+            # Add Midi Input group
+            groups.append({
+                'id': 3,
                 'name': 'Midi Input',
                 'type': 'midi_input',
                 'port_count': 1,
@@ -972,10 +986,10 @@ class CarlaBackendBridge:
                     'outputs': ['Capture 1']
                 }
             })
-            
+
             # Add Midi Output group
             groups.append({
-                'id': 3,
+                'id': 4,
                 'name': 'Midi Output',
                 'type': 'midi_output',
                 'port_count': 1,
@@ -984,16 +998,25 @@ class CarlaBackendBridge:
                 }
             })
             
-            # Add plugin groups (starting from group ID 4)
-            for i in range(plugin_count):
-                plugin_info = self.get_plugin_info(i)
+            # Add plugin groups - use tracked backend group IDs
+            for plugin_id in range(plugin_count):
+                plugin_info = self.get_plugin_info(plugin_id)
                 if plugin_info:
+                    # Use real backend group ID if available
+                    backend_group_id = self._plugin_to_group_map.get(plugin_id, None)
+                    if backend_group_id is not None:
+                        group_id = backend_group_id
+                    else:
+                        # Fallback to assumed ID (will be wrong!)
+                        group_id = 4 + plugin_id
+                        self.logger.warning(f"Plugin {plugin_id} has no tracked group ID, using fallback {group_id}")
+                    
                     # Get actual port counts for this plugin
                     audio_ins = 0
                     audio_outs = 0
                     
                     try:
-                        audio_port_info = self.host.get_audio_port_count_info(i)
+                        audio_port_info = self.host.get_audio_port_count_info(plugin_id)
                         if audio_port_info:
                             audio_ins = audio_port_info.ins
                             audio_outs = audio_port_info.outs
@@ -1003,10 +1026,10 @@ class CarlaBackendBridge:
                         audio_outs = 2
                     
                     groups.append({
-                        'id': i + 4,  # Plugin groups start at 4
-                        'name': plugin_info.get('name', f'Plugin {i}'),
+                        'id': group_id,
+                        'name': plugin_info.get('name', f'Plugin {plugin_id}'),
                         'type': 'plugin',
-                        'plugin_id': i,
+                        'plugin_id': plugin_id,
                         'audio_inputs': audio_ins,
                         'audio_outputs': audio_outs,
                         'ports': {
