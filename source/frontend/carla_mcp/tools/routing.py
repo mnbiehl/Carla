@@ -294,7 +294,7 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
         Args:
             system_input: System input number (1-16)
             plugin_id: Destination plugin ID
-            channel: "mono" or "stereo"
+            channel: "mono", "left", "right", or "stereo"
             
         Returns:
             Status message
@@ -315,12 +315,20 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             connections = []
             if channel == "stereo":
                 # Connect to both inputs
-                connections.append((system_group, system_port, 
+                connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1))
+            elif channel == "left":
+                # Connect to left input only
+                connections.append((system_group, system_port,
+                                  plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
+            elif channel == "right":
+                # Connect to right input only
+                connections.append((system_group, system_port,
+                                  plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1))
             else:
-                # Mono connection
+                # Mono connection (same as left)
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
             
