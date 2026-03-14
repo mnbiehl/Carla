@@ -297,10 +297,7 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
 
         global instance_manager, chain_launcher, jack_router
         instance_manager = InstanceManager(base_mcp_port=config.mcp_port + 1)
-        chain_launcher = ChainLauncher(
-            instance_manager=instance_manager,
-            carla_binary=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "bin", "Carla")
-        )
+        chain_launcher = ChainLauncher(instance_manager=instance_manager)
         jack_router = JackRouter()
 
         register_orchestration_tools(mcp_server, chain_launcher, jack_router, instance_manager)

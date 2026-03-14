@@ -11,9 +11,15 @@ logger = logging.getLogger(__name__)
 class ChainLauncher:
     """Spawns Carla instances as separate processes."""
 
-    def __init__(self, instance_manager: InstanceManager, carla_binary: str = "./bin/Carla"):
+    def __init__(self, instance_manager: InstanceManager, carla_script: str = None):
         self._manager = instance_manager
-        self._carla_binary = carla_binary
+        if carla_script is None:
+            # Default: carla.py in the frontend directory
+            self._carla_script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "..", "carla.py"
+            )
+        else:
+            self._carla_script = carla_script
 
     def launch(self, name: str) -> CarlaInstance:
         if self._manager.get(name) is not None:
@@ -26,7 +32,11 @@ class ChainLauncher:
         env["CARLA_MCP_PORT"] = str(mcp_port)
         env["CARLA_CLIENT_NAME"] = jack_name
 
-        proc = subprocess.Popen([self._carla_binary], env=env)
+        proc = subprocess.Popen(
+            ["pw-jack", "python3", self._carla_script],
+            env=env,
+            cwd=os.path.dirname(self._carla_script),
+        )
 
         instance = CarlaInstance(
             name=name,

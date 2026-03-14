@@ -19,7 +19,7 @@ def instance_manager():
 
 @pytest.fixture
 def launcher(instance_manager):
-    return ChainLauncher(instance_manager=instance_manager, carla_binary="./bin/Carla")
+    return ChainLauncher(instance_manager=instance_manager, carla_script="/fake/carla.py")
 
 
 @pytest.fixture

@@ -8,7 +8,7 @@ from carla_mcp.state.instance_manager import InstanceManager
 class TestChainLauncherLaunch:
     def test_launch_creates_instance(self):
         mgr = InstanceManager(base_mcp_port=3002)
-        launcher = ChainLauncher(instance_manager=mgr, carla_binary="./bin/Carla")
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value = Mock(poll=Mock(return_value=None))
             instance = launcher.launch("guitar")
@@ -19,7 +19,7 @@ class TestChainLauncherLaunch:
 
     def test_launch_sets_env_vars(self):
         mgr = InstanceManager(base_mcp_port=3002)
-        launcher = ChainLauncher(instance_manager=mgr, carla_binary="./bin/Carla")
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value = Mock(poll=Mock(return_value=None))
             launcher.launch("guitar")
@@ -29,7 +29,7 @@ class TestChainLauncherLaunch:
 
     def test_launch_registers_instance(self):
         mgr = InstanceManager(base_mcp_port=3002)
-        launcher = ChainLauncher(instance_manager=mgr, carla_binary="./bin/Carla")
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value = Mock(poll=Mock(return_value=None))
             launcher.launch("guitar")
@@ -37,7 +37,7 @@ class TestChainLauncherLaunch:
 
     def test_launch_duplicate_name_raises(self):
         mgr = InstanceManager(base_mcp_port=3002)
-        launcher = ChainLauncher(instance_manager=mgr, carla_binary="./bin/Carla")
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value = Mock(poll=Mock(return_value=None))
             launcher.launch("guitar")
@@ -48,7 +48,7 @@ class TestChainLauncherLaunch:
 class TestChainLauncherTerminate:
     def test_terminate_stops_process(self):
         mgr = InstanceManager(base_mcp_port=3002)
-        launcher = ChainLauncher(instance_manager=mgr, carla_binary="./bin/Carla")
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
         mock_proc = Mock()
         mock_proc.poll.return_value = None
         mock_proc.wait.return_value = 0
@@ -60,6 +60,6 @@ class TestChainLauncherTerminate:
 
     def test_terminate_nonexistent_raises(self):
         mgr = InstanceManager(base_mcp_port=3002)
-        launcher = ChainLauncher(instance_manager=mgr, carla_binary="./bin/Carla")
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
         with pytest.raises(ValueError, match="not found"):
             launcher.terminate("nonexistent")
