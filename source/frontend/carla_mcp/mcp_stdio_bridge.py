@@ -74,12 +74,10 @@ async def _start_carla() -> str:
     """Start Carla (internal helper)."""
     global _carla_process, _carla_log_file
 
-    if _is_carla_running():
-        return "Carla is already running."
-
-    if _is_carla_reachable():
+    if _is_carla_running() or _is_carla_reachable():
         count = await discover_and_register(bridge, CARLA_SSE_URL)
-        return f"Carla is already running (started externally). {count} tools registered."
+        src = f"managed (PID {_carla_process.pid})" if _is_carla_running() else "external"
+        return f"Carla is already running ({src}). {count} tools registered."
 
     env = os.environ.copy()
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
@@ -98,7 +96,12 @@ async def _start_carla() -> str:
     for i in range(15):
         await asyncio.sleep(1)
         if _is_carla_reachable():
-            count = await discover_and_register(bridge, CARLA_SSE_URL)
+            # Carla may accept connections before tools are registered; retry briefly
+            for _ in range(5):
+                count = await discover_and_register(bridge, CARLA_SSE_URL)
+                if count > 0:
+                    break
+                await asyncio.sleep(1)
             return f"Carla started (PID {_carla_process.pid}). MCP server ready on port {CARLA_PORT}. {count} tools registered."
         if _carla_process.poll() is not None:
             return f"Carla process exited with code {_carla_process.returncode}. Check logs."

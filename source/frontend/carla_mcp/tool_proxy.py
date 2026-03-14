@@ -4,6 +4,7 @@ import inspect
 import logging
 from typing import Any, Optional
 
+from fastmcp.tools import Tool
 from mcp.client.sse import sse_client
 from mcp import ClientSession
 from mcp.types import TextContent
@@ -79,6 +80,10 @@ def _build_tool_function(
 
     sig = inspect.Signature(params)
 
+    # Build __annotations__ dict for pydantic/FastMCP compatibility
+    annotations = {p.name: p.annotation for p in params}
+    annotations["return"] = str
+
     async def wrapper(**kwargs):
         # Filter out None values (unset optional params)
         filtered = {k: v for k, v in kwargs.items() if v is not None}
@@ -87,6 +92,7 @@ def _build_tool_function(
     wrapper.__name__ = name
     wrapper.__qualname__ = name
     wrapper.__signature__ = sig
+    wrapper.__annotations__ = annotations
 
     return wrapper
 
@@ -123,7 +129,10 @@ async def discover_and_register(bridge, sse_url: str) -> int:
                     fn = _build_tool_function(
                         tool.name, tool.inputSchema, sse_url
                     )
-                    bridge.add_tool(fn, name=tool.name, description=tool.description)
+                    tool_obj = Tool.from_function(
+                        fn, name=tool.name, description=tool.description
+                    )
+                    bridge.add_tool(tool_obj)
                     _registered_tools.add(tool.name)
 
                 return len(result.tools)
