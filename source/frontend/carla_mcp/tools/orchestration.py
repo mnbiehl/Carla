@@ -143,7 +143,9 @@ def register_orchestration_tools(
         Returns:
             Formatted routing overview
         """
-        connections = _router.list_connections()
+        # Filter to only show connections involving our components
+        prefixes = ["looperdooper:", "Carla:", "CarlaChain_"]
+        connections = _router.list_connections(filter_prefixes=prefixes)
         if not connections:
             return "No active audio routes"
         lines = ["Audio routes:"]

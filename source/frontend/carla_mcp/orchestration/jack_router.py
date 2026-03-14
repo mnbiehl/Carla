@@ -48,6 +48,7 @@ class JackRouter:
             return r1
         r2 = self.connect(src_r, dst_r)
         if not r2.success:
+            self.disconnect(src_l, dst_l)  # rollback left channel
             return r2
         return RouteResult(success=True)
 
@@ -62,7 +63,7 @@ class JackRouter:
             )
         return RouteResult(success=True)
 
-    def list_connections(self) -> List[Tuple[str, str]]:
+    def list_connections(self, filter_prefixes: List[str] = None) -> List[Tuple[str, str]]:
         result = self._run_pw_link("-l", "-I")
         if result.returncode != 0:
             return []
@@ -71,5 +72,12 @@ class JackRouter:
             if " -> " in line:
                 parts = line.strip().split(" -> ", 1)
                 if len(parts) == 2:
-                    connections.append((parts[0].strip(), parts[1].strip()))
+                    src, dst = parts[0].strip(), parts[1].strip()
+                    if filter_prefixes:
+                        if not any(
+                            src.startswith(p) or dst.startswith(p)
+                            for p in filter_prefixes
+                        ):
+                            continue
+                    connections.append((src, dst))
         return connections
