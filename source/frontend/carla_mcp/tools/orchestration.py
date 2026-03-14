@@ -45,6 +45,21 @@ def register_orchestration_tools(
             return f"❌ Failed to launch chain: {e}"
 
         msg = f"✅ Created chain '{name}' (MCP port {instance.mcp_port}, JACK client {instance.jack_client_name})"
+
+        # Wait for JACK ports to register, then remove system auto-connections.
+        # PipeWire auto-connects new clients to hardware — we need to undo that.
+        # The chain has no plugins yet so it's passing silence — no pop.
+        import time
+        removed = 0
+        for _ in range(5):
+            time.sleep(1)
+            n = _router.disconnect_client_from_system(instance.jack_client_name)
+            removed += n
+            if n == 0 and removed > 0:
+                break  # No new connections appeared, we're done
+        if removed:
+            msg += f"\n✅ Removed {removed} system auto-connections"
+
         if source_track:
             route_result = _router.connect_stereo(
                 f"looperdooper:{source_track}_out_l",

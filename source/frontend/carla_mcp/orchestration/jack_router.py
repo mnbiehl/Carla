@@ -97,3 +97,22 @@ class JackRouter:
                 # This is a port name (not an incoming connection line)
                 current_output = stripped
         return connections
+
+    def disconnect_client_from_system(self, client_name: str) -> int:
+        """Disconnect all connections between a client and system I/O.
+
+        Removes auto-connections PipeWire makes to hardware ports.
+        Returns the number of connections disconnected.
+        """
+        all_conns = self.list_connections()
+        count = 0
+        for src, dst in all_conns:
+            src_is_client = src.startswith(f"{client_name}:")
+            dst_is_client = dst.startswith(f"{client_name}:")
+            src_is_system = src.startswith("alsa_") or src.startswith("system:")
+            dst_is_system = dst.startswith("alsa_") or dst.startswith("system:")
+
+            if (src_is_client and dst_is_system) or (src_is_system and dst_is_client):
+                self.disconnect(src, dst)
+                count += 1
+        return count
