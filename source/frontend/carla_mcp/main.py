@@ -123,29 +123,12 @@ def register_custom_endpoints():
 def register_all_tools(backend_bridge):
     """Register all MCP tools with the server"""
     logger.info("Registering MCP tools...")
-    
-    import sys
-    print(f"🔍 DEBUG: register_all_tools called with mcp_server: {mcp_server}", file=sys.__stderr__)
-    print(f"🔍 DEBUG: Using backend_bridge: {backend_bridge}", file=sys.__stderr__)
-    
+
     # Register connection tools with backend bridge
-    print(f"🔍 DEBUG: About to register connection tools", file=sys.__stderr__)
-    try:
-        register_connection_tools(mcp_server, backend_bridge)
-        print(f"🔍 DEBUG: Finished registering connection tools", file=sys.__stderr__)
-    except Exception as e:
-        print(f"❌ ERROR: Failed to register connection tools: {e}", file=sys.__stderr__)
-    
-    # Register plugin management tools with backend bridge  
-    print(f"🔍 DEBUG: About to register plugin tools", file=sys.__stderr__)
-    try:
-        register_plugin_tools(mcp_server, backend_bridge)
-        if hasattr(mcp_server, '_tool_manager'):
-            tool_count = len(getattr(mcp_server._tool_manager, '_tools', {}))
-            print(f"🔍 DEBUG: After plugin tools - Total tools registered: {tool_count}", file=sys.__stderr__)
-        print(f"🔍 DEBUG: Finished registering plugin tools", file=sys.__stderr__)
-    except Exception as e:
-        print(f"❌ ERROR: Failed to register plugin tools: {e}", file=sys.__stderr__)
+    register_connection_tools(mcp_server, backend_bridge)
+
+    # Register plugin management tools with backend bridge
+    register_plugin_tools(mcp_server, backend_bridge)
     
     # Register parameter control tools
     register_parameter_tools(mcp_server, backend_bridge)
@@ -266,7 +249,7 @@ def mcp_server_async_thread(carla_host_instance=None):
     asyncio.run(run_async())
 
 
-def start_mcp_server(carla_host_instance=None):
+def start_mcp_server(carla_host_instance=None, gui_instance=None):
     """Start the MCP server following standard FastMCP pattern"""
     global mcp_thread, logger
     
@@ -291,8 +274,10 @@ def start_mcp_server(carla_host_instance=None):
         from .backend.backend_bridge import CarlaBackendBridge
         global backend_bridge
         backend_bridge = CarlaBackendBridge(carla_host_instance)
+        if gui_instance is not None:
+            backend_bridge.set_gui_instance(gui_instance)
         logger.info(f"Created backend bridge: {backend_bridge}")
-        
+
         # Set up callbacks to track patchbay connections
         setup_patchbay_callbacks(carla_host_instance)
         

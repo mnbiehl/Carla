@@ -45,6 +45,7 @@ def register_session_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                 return f"❌ Failed to create directory: {e}"
         
         if backend_bridge.save_project(filename):
+            backend_bridge.notify_project_saved(filename)
             return f"✅ Project saved to: {filename}"
         else:
             return f"❌ Failed to save project to: {filename}"
@@ -68,6 +69,7 @@ def register_session_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             return f"❌ Project file not found: {filename}"
         
         if backend_bridge.load_project(filename):
+            backend_bridge.notify_project_loaded(filename)
             return f"✅ Project loaded from: {filename}"
         else:
             return f"❌ Failed to load project from: {filename}"

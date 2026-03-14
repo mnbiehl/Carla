@@ -41,15 +41,55 @@ class CarlaBackendBridge:
         self.logger = logging.getLogger(__name__)
         self._error_handler = get_error_handler()
         self._cleanup_performed = False
-        
+        self._gui_instance = None
+
         # Track patchbay connections
         self._patchbay_connections = {}
         self._last_patchbay_error = ""
-        
+
         # Track real backend group IDs for plugins
         self._plugin_to_group_map = {}  # Maps plugin_id -> backend_group_id
         self._group_to_plugin_map = {}  # Maps backend_group_id -> plugin_id
         
+    # --------------------------------------------------------------------------------------------------------
+    # GUI Integration (thread-safe)
+
+    def set_gui_instance(self, gui_instance):
+        """Store reference to the CarlaHostW GUI for cross-thread notifications"""
+        self._gui_instance = gui_instance
+
+    def _invoke_gui_slot(self, slot_name, filename=None):
+        """Invoke a GUI slot from the MCP thread via Qt's queued connection (thread-safe)"""
+        gui = self._gui_instance
+        if gui is None:
+            return
+        try:
+            from PyQt5.QtCore import QMetaObject, Qt, Q_ARG
+            if filename is not None:
+                QMetaObject.invokeMethod(gui, slot_name, Qt.QueuedConnection, Q_ARG(str, filename))
+            else:
+                QMetaObject.invokeMethod(gui, slot_name, Qt.QueuedConnection)
+        except ImportError:
+            try:
+                from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+                conn = Qt.ConnectionType.QueuedConnection
+                if filename is not None:
+                    QMetaObject.invokeMethod(gui, slot_name, conn, Q_ARG(str, filename))
+                else:
+                    QMetaObject.invokeMethod(gui, slot_name, conn)
+            except Exception as e:
+                self.logger.warning(f"Could not invoke GUI slot {slot_name}: {e}")
+        except Exception as e:
+            self.logger.warning(f"Could not invoke GUI slot {slot_name}: {e}")
+
+    def notify_project_saved(self, filename):
+        """Notify the GUI that a project was saved (thread-safe)"""
+        self._invoke_gui_slot("_slot_mcpProjectSaved", filename)
+
+    def notify_project_loaded(self, filename):
+        """Notify the GUI that a project was loaded (thread-safe)"""
+        self._invoke_gui_slot("_slot_mcpProjectLoaded", filename)
+
     # --------------------------------------------------------------------------------------------------------
     # Audio Monitoring
     

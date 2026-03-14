@@ -2817,7 +2817,7 @@ class HostWindow(QMainWindow):
         
         try:
             from carla_mcp import start_mcp_server
-            success = start_mcp_server(self.host)
+            success = start_mcp_server(self.host, gui_instance=self)
             if success:
                 self.fMcpServer = True
                 import sys
@@ -2844,6 +2844,20 @@ class HostWindow(QMainWindow):
             import sys
             print(f"❌ Error stopping MCP server: {e}", file=sys.stderr)
     
+    @pyqtSlot(str)
+    def _slot_mcpProjectSaved(self, filename):
+        """Called from MCP thread after a project save"""
+        self.fProjectFilename = QFileInfo(filename).absoluteFilePath()
+        self.setProperWindowTitle()
+        self.setProjectModified(False)
+
+    @pyqtSlot(str)
+    def _slot_mcpProjectLoaded(self, filename):
+        """Called from MCP thread after a project load"""
+        self.fProjectFilename = QFileInfo(filename).absoluteFilePath()
+        self.setProperWindowTitle()
+        self.setProjectModified(False)
+
     def slot_logMcpStatus(self):
         """Log MCP server initialization status"""
         if self.fMcpServerEnabled:
