@@ -113,6 +113,7 @@ class JackRouter:
             dst_is_system = dst.startswith("alsa_") or dst.startswith("system:")
 
             if (src_is_client and dst_is_system) or (src_is_system and dst_is_client):
-                self.disconnect(src, dst)
-                count += 1
+                result = self.disconnect(src, dst)
+                if result.success:
+                    count += 1
         return count

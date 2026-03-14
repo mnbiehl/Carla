@@ -24,10 +24,11 @@ Usage in .mcp.json:
 }
 """
 
+import asyncio
+import atexit
 import os
 import sys
 import json
-import signal
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -50,6 +51,7 @@ bridge = FastMCP("Carla MCP Bridge")
 
 # Track the Carla process we launched
 _carla_process: subprocess.Popen | None = None
+_carla_log_file = None
 
 
 def _is_carla_running() -> bool:
@@ -83,7 +85,7 @@ async def _carla_session():
 
 async def _start_carla() -> str:
     """Start Carla (internal helper)."""
-    global _carla_process
+    global _carla_process, _carla_log_file
 
     if _is_carla_running():
         return "Carla is already running."
@@ -95,19 +97,18 @@ async def _start_carla() -> str:
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
 
     # Use /usr/bin/python3 (system Python with PyQt5), not the venv python
-    log_file = open("/tmp/carla-mcp.log", "w")
+    _carla_log_file = open("/tmp/carla-mcp.log", "w")
     _carla_process = subprocess.Popen(
         ["pw-jack", "/usr/bin/python3", str(CARLA_SCRIPT)],
         env=env,
         cwd=str(CARLA_FRONTEND_DIR),
-        stdout=log_file,
-        stderr=log_file,
+        stdout=_carla_log_file,
+        stderr=_carla_log_file,
     )
 
     # Wait for MCP to become reachable
-    import time
     for i in range(15):
-        time.sleep(1)
+        await asyncio.sleep(1)
         if _is_carla_reachable():
             return f"Carla started (PID {_carla_process.pid}). MCP server ready on port {CARLA_PORT}."
         if _carla_process.poll() is not None:
@@ -118,7 +119,7 @@ async def _start_carla() -> str:
 
 async def _stop_carla() -> str:
     """Stop Carla (internal helper)."""
-    global _carla_process
+    global _carla_process, _carla_log_file
 
     if _carla_process is None or _carla_process.poll() is not None:
         _carla_process = None
@@ -129,9 +130,15 @@ async def _stop_carla() -> str:
         _carla_process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         _carla_process.kill()
+        _carla_process.wait()
 
     pid = _carla_process.pid
     _carla_process = None
+
+    if _carla_log_file is not None:
+        _carla_log_file.close()
+        _carla_log_file = None
+
     return f"Carla stopped (PID {pid})."
 
 
@@ -154,8 +161,7 @@ async def carla_stop() -> str:
 async def carla_restart() -> str:
     """Restart Carla (stop then start)."""
     stop_msg = await _stop_carla()
-    import time
-    time.sleep(1)
+    await asyncio.sleep(1)
     start_msg = await _start_carla()
     return f"{stop_msg}\n{start_msg}"
 
@@ -233,6 +239,25 @@ async def carla(tool: str, arguments: str = "{}") -> str:
             return "\n".join(parts) if parts else "OK"
     except Exception as e:
         return f"Error calling '{tool}': {e}\n\nIs Carla running? Use carla_status to check."
+
+
+def _atexit_cleanup():
+    """Ensure Carla is terminated on exit."""
+    global _carla_process, _carla_log_file
+    if _carla_process is not None and _carla_process.poll() is None:
+        _carla_process.terminate()
+        try:
+            _carla_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _carla_process.kill()
+            _carla_process.wait()
+        _carla_process = None
+    if _carla_log_file is not None:
+        _carla_log_file.close()
+        _carla_log_file = None
+
+
+atexit.register(_atexit_cleanup)
 
 
 def main():
