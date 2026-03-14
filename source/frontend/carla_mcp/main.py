@@ -24,6 +24,9 @@ mcp_server = None
 mcp_thread = None
 logger = None
 backend_bridge = None
+instance_manager = None
+chain_launcher = None
+jack_router = None
 
 # Import tool registration functions
 from .tools.connection import register_connection_tools
@@ -35,6 +38,7 @@ from .tools.sessions import register_session_tools
 from .tools.routing import register_routing_tools
 from .tools.auto_gain import register_auto_gain_tools
 from .tools.system import register_system_tools
+from .tools.orchestration import register_orchestration_tools
 
 # Import resource registration functions
 from .resources.status import register_status_resources
@@ -237,7 +241,7 @@ def mcp_server_async_thread(carla_host_instance=None):
                 logger.info(f"Starting async MCP server with SSE transport on {config.mcp_host}:{config.mcp_port}...")
                 
                 # Tools and resources are already registered - use SSE-specific async runner
-                await mcp_server.run_sse_async(host="127.0.0.1", port=3001)
+                await mcp_server.run_sse_async(host=config.mcp_host, port=config.mcp_port)
             finally:
                 sys.stdout = carla_stdout
                 sys.stderr = carla_stderr
@@ -284,7 +288,24 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
         # Register tools and resources with shared bridge
         register_all_tools(backend_bridge)
         register_all_resources(backend_bridge)
-        
+
+        # Create orchestration components for multi-instance management
+        import os
+        from .state.instance_manager import InstanceManager
+        from .orchestration.chain_launcher import ChainLauncher
+        from .orchestration.jack_router import JackRouter
+
+        global instance_manager, chain_launcher, jack_router
+        instance_manager = InstanceManager(base_mcp_port=config.mcp_port + 1)
+        chain_launcher = ChainLauncher(
+            instance_manager=instance_manager,
+            carla_binary=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "bin", "Carla")
+        )
+        jack_router = JackRouter()
+
+        register_orchestration_tools(mcp_server, chain_launcher, jack_router, instance_manager)
+        logger.info("Orchestration tools registered")
+
         # Register custom endpoints including SSE monitoring
         register_custom_endpoints()
         
@@ -309,14 +330,23 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
 
 def stop_mcp_server():
     """Stop the MCP server"""
-    global mcp_server, mcp_thread, backend_bridge, logger
-    
+    global mcp_server, mcp_thread, backend_bridge, logger, instance_manager, chain_launcher, jack_router
+
     if mcp_server:
         logger.info("Stopping MCP server...")
         try:
             # Mark server as stopping
             mcp_server._stopping = True
-            
+
+            # Terminate all child Carla instances
+            if chain_launcher is not None and instance_manager is not None:
+                for name in list(instance_manager.list_instances()):
+                    try:
+                        chain_launcher.terminate(name)
+                    except Exception as e:
+                        if logger:
+                            logger.warning(f"Failed to terminate chain '{name}': {e}")
+
             # Clean up backend bridge first
             if backend_bridge:
                 logger.info("Cleaning up backend bridge...")
@@ -338,6 +368,9 @@ def stop_mcp_server():
     mcp_server = None
     mcp_thread = None
     backend_bridge = None
+    instance_manager = None
+    chain_launcher = None
+    jack_router = None
 
 
 def is_mcp_server_running():
