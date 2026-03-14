@@ -25,7 +25,7 @@ class TestChainLauncherLaunch:
             launcher.launch("guitar")
             env = mock_popen.call_args.kwargs["env"]
             assert env["CARLA_MCP_PORT"] == "3002"
-            assert env["JACK_CLIENT_NAME"] == "CarlaChain_guitar"
+            assert env["CARLA_CLIENT_NAME"] == "CarlaChain_guitar"
 
     def test_launch_registers_instance(self):
         mgr = InstanceManager(base_mcp_port=3002)

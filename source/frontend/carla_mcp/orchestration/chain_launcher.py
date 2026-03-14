@@ -24,7 +24,7 @@ class ChainLauncher:
 
         env = os.environ.copy()
         env["CARLA_MCP_PORT"] = str(mcp_port)
-        env["JACK_CLIENT_NAME"] = jack_name
+        env["CARLA_CLIENT_NAME"] = jack_name
 
         proc = subprocess.Popen([self._carla_binary], env=env)
 
