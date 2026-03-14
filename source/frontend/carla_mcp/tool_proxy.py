@@ -31,17 +31,20 @@ async def _forward_tool_call(
     tool_name: str, args: dict, sse_url: str
 ) -> str:
     """Connect to Carla SSE and forward a tool call."""
-    async with sse_client(sse_url) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            result = await session.call_tool(tool_name, args)
-            parts = []
-            for content in result.content:
-                if isinstance(content, TextContent):
-                    parts.append(content.text)
-                else:
-                    parts.append(str(content))
-            return "\n".join(parts)
+    try:
+        async with sse_client(sse_url) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, args)
+                parts = []
+                for content in result.content:
+                    if isinstance(content, TextContent):
+                        parts.append(content.text)
+                    else:
+                        parts.append(str(content))
+                return "\n".join(parts) if parts else "OK"
+    except Exception as e:
+        return f"Error calling '{tool_name}': {e}\n\nIs Carla running? Use carla_start to check."
 
 
 def _build_tool_function(
@@ -94,10 +97,14 @@ _registered_tools: set[str] = set()
 
 def unregister_all(bridge) -> int:
     """Remove all previously registered proxy tools from the bridge."""
-    count = len(_registered_tools)
+    count = 0
     for tool_name in list(_registered_tools):
-        bridge.remove_tool(tool_name)
-    _registered_tools.clear()
+        try:
+            bridge.remove_tool(tool_name)
+            count += 1
+        except Exception:
+            logger.warning("Could not remove tool '%s'", tool_name)
+        _registered_tools.discard(tool_name)
     return count
 
 
@@ -116,10 +123,10 @@ async def discover_and_register(bridge, sse_url: str) -> int:
                     fn = _build_tool_function(
                         tool.name, tool.inputSchema, sse_url
                     )
-                    bridge.add_tool(fn, tool.name, tool.description)
+                    bridge.add_tool(fn, name=tool.name, description=tool.description)
                     _registered_tools.add(tool.name)
 
                 return len(result.tools)
-    except (ConnectionRefusedError, OSError, Exception) as e:
+    except Exception as e:
         logger.warning("Failed to discover Carla tools: %s", e)
         return 0
