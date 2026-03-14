@@ -81,12 +81,8 @@ async def _carla_session():
             yield session
 
 
-@bridge.tool()
-async def carla_start() -> str:
-    """
-    Start the Carla audio plugin host.
-    Launches Carla with PipeWire/JACK support and MCP server enabled.
-    """
+async def _start_carla() -> str:
+    """Start Carla (internal helper)."""
     global _carla_process
 
     if _is_carla_running():
@@ -120,9 +116,8 @@ async def carla_start() -> str:
     return f"Carla started (PID {_carla_process.pid}) but MCP server not yet reachable. It may still be initializing."
 
 
-@bridge.tool()
-async def carla_stop() -> str:
-    """Stop the running Carla instance."""
+async def _stop_carla() -> str:
+    """Stop Carla (internal helper)."""
     global _carla_process
 
     if _carla_process is None or _carla_process.poll() is not None:
@@ -141,12 +136,27 @@ async def carla_stop() -> str:
 
 
 @bridge.tool()
+async def carla_start() -> str:
+    """
+    Start the Carla audio plugin host.
+    Launches Carla with PipeWire/JACK support and MCP server enabled.
+    """
+    return await _start_carla()
+
+
+@bridge.tool()
+async def carla_stop() -> str:
+    """Stop the running Carla instance."""
+    return await _stop_carla()
+
+
+@bridge.tool()
 async def carla_restart() -> str:
     """Restart Carla (stop then start)."""
-    stop_msg = await carla_stop()
+    stop_msg = await _stop_carla()
     import time
     time.sleep(1)
-    start_msg = await carla_start()
+    start_msg = await _start_carla()
     return f"{stop_msg}\n{start_msg}"
 
 
