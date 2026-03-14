@@ -16,8 +16,6 @@
  */
 
 #include "CarlaEngineGraph.hpp"
-#include "CarlaEngineGraphParallel.hpp"
-#include "CarlaEngineGraphParallelV2.hpp"
 #include "CarlaEngineInternal.hpp"
 #include "CarlaPlugin.hpp"
 
@@ -2690,10 +2688,7 @@ void EngineInternalGraph::create(const uint32_t audioIns, const uint32_t audioOu
     if (fIsRack)
     {
         CARLA_SAFE_ASSERT_RETURN(fRack == nullptr,);
-        if (kEngine->getOptions().parallelProcessing)
-            fRack = new ParallelRackGraphV2(kEngine, audioIns, audioOuts);  // Use modern C++20 implementation
-        else
-            fRack = new RackGraph(kEngine, audioIns, audioOuts);
+        fRack = new RackGraph(kEngine, audioIns, audioOuts);
     }
     else
     {

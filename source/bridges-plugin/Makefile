@@ -130,7 +130,6 @@ OBJS_native = \
 	$(OBJDIR)/CarlaEngineData.cpp.o \
 	$(OBJDIR)/CarlaEngineDummy.cpp.o \
 	$(OBJDIR)/CarlaEngineGraph.cpp.o \
-	$(OBJDIR)/CarlaEngineGraphParallel.cpp.o \
 	$(OBJDIR)/CarlaEngineInternal.cpp.o \
 	$(OBJDIR)/CarlaEngineNative.cpp.o \
 	$(OBJDIR)/CarlaEngineOscSend.cpp.o \
