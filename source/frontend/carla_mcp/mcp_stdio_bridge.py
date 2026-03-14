@@ -98,12 +98,14 @@ async def carla_start() -> str:
     env = os.environ.copy()
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
 
+    # Use /usr/bin/python3 (system Python with PyQt5), not the venv python
+    log_file = open("/tmp/carla-mcp.log", "w")
     _carla_process = subprocess.Popen(
-        ["pw-jack", "python3", str(CARLA_SCRIPT)],
+        ["pw-jack", "/usr/bin/python3", str(CARLA_SCRIPT)],
         env=env,
         cwd=str(CARLA_FRONTEND_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
     )
 
     # Wait for MCP to become reachable
