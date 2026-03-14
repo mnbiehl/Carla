@@ -32,10 +32,14 @@ class ChainLauncher:
         env["CARLA_MCP_PORT"] = str(mcp_port)
         env["CARLA_CLIENT_NAME"] = jack_name
 
+        # Use /usr/bin/python3 (system Python with PyQt5), not the venv python
+        log_file = open(f"/tmp/carla-chain-{name}.log", "w")
         proc = subprocess.Popen(
-            ["pw-jack", "python3", self._carla_script],
+            ["pw-jack", "/usr/bin/python3", self._carla_script],
             env=env,
             cwd=os.path.dirname(self._carla_script),
+            stdout=log_file,
+            stderr=log_file,
         )
 
         instance = CarlaInstance(
