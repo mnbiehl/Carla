@@ -28,13 +28,9 @@ import atexit
 import os
 import sys
 import subprocess
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastmcp import FastMCP
-from mcp.client.sse import sse_client
-from mcp import ClientSession
-from mcp.types import TextContent
 
 from carla_mcp.tool_proxy import discover_and_register, unregister_all
 
@@ -74,15 +70,6 @@ def _is_carla_reachable() -> bool:
         return False
 
 
-@asynccontextmanager
-async def _carla_session():
-    """Connect to Carla's SSE MCP server on demand."""
-    async with sse_client(CARLA_SSE_URL) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
-
-
 async def _start_carla() -> str:
     """Start Carla (internal helper)."""
     global _carla_process, _carla_log_file
@@ -91,7 +78,8 @@ async def _start_carla() -> str:
         return "Carla is already running."
 
     if _is_carla_reachable():
-        return "Carla is already running (started externally)."
+        count = await discover_and_register(bridge, CARLA_SSE_URL)
+        return f"Carla is already running (started externally). {count} tools registered."
 
     env = os.environ.copy()
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
@@ -162,7 +150,6 @@ async def carla_stop() -> str:
 @bridge.tool()
 async def carla_restart() -> str:
     """Restart Carla (stop then start)."""
-    unregister_all(bridge)
     stop_msg = await _stop_carla()
     await asyncio.sleep(1)
     start_msg = await _start_carla()
@@ -182,7 +169,6 @@ async def carla_status() -> str:
         return f"Carla process running (PID {_carla_process.pid}) but MCP not reachable yet."
     else:
         return "Carla is not running. Use carla_start to launch it."
-
 
 
 def _atexit_cleanup():
