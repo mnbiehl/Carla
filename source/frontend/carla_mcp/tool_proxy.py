@@ -86,3 +86,40 @@ def _build_tool_function(
     wrapper.__signature__ = sig
 
     return wrapper
+
+
+# Module-level set tracking registered tool names
+_registered_tools: set[str] = set()
+
+
+def unregister_all(bridge) -> int:
+    """Remove all previously registered proxy tools from the bridge."""
+    count = len(_registered_tools)
+    for tool_name in list(_registered_tools):
+        bridge.remove_tool(tool_name)
+    _registered_tools.clear()
+    return count
+
+
+async def discover_and_register(bridge, sse_url: str) -> int:
+    """Discover tools from Carla SSE and register them with the bridge.
+
+    Returns the number of tools registered, or 0 on connection error.
+    """
+    try:
+        async with sse_client(sse_url) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.list_tools()
+
+                for tool in result.tools:
+                    fn = _build_tool_function(
+                        tool.name, tool.inputSchema, sse_url
+                    )
+                    bridge.add_tool(fn, tool.name, tool.description)
+                    _registered_tools.add(tool.name)
+
+                return len(result.tools)
+    except (ConnectionRefusedError, OSError, Exception) as e:
+        logger.warning("Failed to discover Carla tools: %s", e)
+        return 0
