@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: ./dev <command> [args...]
+
+Commands:
+  run [-q N]    Start Carla via pw-jack (default quantum: 256)
+  mcp           Run MCP server standalone (for testing)
+  build         make -j$(nproc) (passes extra args through)
+  test          uv run pytest (passes extra args through)
+  help          Show this help message
+EOF
+}
+
+PW_QUANTUM=256
+
+ensure_pw_quantum() {
+    # Force PipeWire quantum to prevent xruns from
+    # devices (e.g. Scarlett 2i2) defaulting to tiny 64-frame buffers.
+    if command -v pw-metadata &>/dev/null; then
+        pw-metadata -n settings 0 clock.quantum "$PW_QUANTUM" 2>/dev/null || true
+        pw-metadata -n settings 0 clock.min-quantum "$PW_QUANTUM" 2>/dev/null || true
+    fi
+}
+
+case "${1:-help}" in
+    run)
+        shift
+        if [[ "${1:-}" == "-q" ]]; then
+            PW_QUANTUM="$2"; shift 2
+        fi
+        ensure_pw_quantum
+        export PIPEWIRE_LATENCY="${PW_QUANTUM}/48000"
+        exec pw-jack python3 source/frontend/carla.py "$@"
+        ;;
+    mcp)
+        shift
+        exec uv run python -m carla_mcp.main "$@"
+        ;;
+    build)
+        shift
+        make -j"$(nproc)" "$@"
+        ;;
+    test)
+        shift
+        uv run pytest "$@"
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

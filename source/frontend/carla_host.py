@@ -235,6 +235,9 @@ class HostWindow(QMainWindow):
 
         # true if NSM server handles our window management
         self.fWindowCloseHideGui = False
+        
+        # true if there are unsaved changes
+        self.fHasUnsavedChanges = False
 
         if host.isControl:
             self.fClientName         = "Carla-Control"
@@ -266,6 +269,25 @@ class HostWindow(QMainWindow):
         self.fMiniCanvasUpdateTimeout = 0
 
         self.fWithCanvas = withCanvas
+
+        # ----------------------------------------------------------------------------------------------------
+        # Internal stuff (MCP server)
+
+        self.fMcpServer = None
+        self.fMcpServerEnabled = False
+        
+        # Try to initialize MCP server
+        self.fMcpImportError = None
+        import sys
+        print("🔍 DEBUG: Attempting to import MCP server module...", file=sys.stderr)
+        try:
+            from carla_mcp import start_mcp_server, stop_mcp_server, is_mcp_server_running
+            self.fMcpServerEnabled = True
+            print("✅ MCP server module imported successfully", file=sys.stderr)
+        except ImportError as e:
+            print(f"❌ Failed to import MCP server module: {e}", file=sys.stderr)
+            self.fMcpImportError = str(e)
+            pass
 
         # ----------------------------------------------------------------------------------------------------
         # Internal stuff (logs)
@@ -620,6 +642,7 @@ class HostWindow(QMainWindow):
         host.PluginAddedCallback.connect(self.slot_handlePluginAddedCallback)
         host.PluginRemovedCallback.connect(self.slot_handlePluginRemovedCallback)
         host.ReloadAllCallback.connect(self.slot_handleReloadAllCallback)
+        host.ParameterValueChangedCallback.connect(self.slot_handleParameterValueChangedCallback)
 
         host.NoteOnCallback.connect(self.slot_handleNoteOnCallback)
         host.NoteOffCallback.connect(self.slot_handleNoteOffCallback)
@@ -691,6 +714,14 @@ class HostWindow(QMainWindow):
 
         if not host.isControl:
             QTimer.singleShot(0, self.slot_engineStart)
+            
+        # Log MCP initialization status
+        QTimer.singleShot(1000, self.slot_logMcpStatus)
+        
+        # Start MCP server at application startup (independent of engine)
+        if self.fMcpServerEnabled:
+            print("🚀 Starting MCP server at application startup...", file=sys.stderr)
+            QTimer.singleShot(100, self.slot_startMcpServer)
 
     # --------------------------------------------------------------------------------------------------------
     # Manage visibility state, needed for NSM
@@ -794,6 +825,12 @@ class HostWindow(QMainWindow):
     def setLoadRDFsNeeded(self):
         self.fLadspaRdfNeedsUpdate = True
 
+    def setProjectModified(self, modified):
+        """Mark the project as having unsaved changes"""
+        if self.fHasUnsavedChanges != modified:
+            self.fHasUnsavedChanges = modified
+            self.setProperWindowTitle()
+    
     def setProperWindowTitle(self):
         title = self.fClientName
 
@@ -801,6 +838,8 @@ class HostWindow(QMainWindow):
             title += " - %s" % os.path.basename(self.fProjectFilename)
         if self.fSessionManagerName:
             title += " (%s)" % self.fSessionManagerName
+        if self.fHasUnsavedChanges:
+            title += " *"
 
         self.setWindowTitle(title)
 
@@ -855,6 +894,9 @@ class HostWindow(QMainWindow):
                              self.host.get_last_error(),
                              QMessageBox.Ok, QMessageBox.Ok)
             return
+        
+        # Clear unsaved changes flag after successful save
+        self.setProjectModified(False)
 
     def projectLoadingStarted(self):
         self.ui.rack.setEnabled(False)
@@ -904,6 +946,8 @@ class HostWindow(QMainWindow):
         self.fProjectFilename = ""
         self.setProperWindowTitle()
         self.host.clear_project_filename()
+        # Clear unsaved changes flag for new project
+        self.setProjectModified(False)
 
     @pyqtSlot()
     def slot_fileOpen(self):
@@ -974,12 +1018,17 @@ class HostWindow(QMainWindow):
         self.ui.text_logs.appendPlainText("======= Starting engine =======")
 
         if self.host.engine_init(audioDriver, self.fClientName):
+            import sys
+            print("🔍 DEBUG: Engine init successful, checking MCP...", file=sys.stderr)
             if firstInit and not (self.host.isControl or self.host.isPlugin):
                 settings = QSafeSettings()
                 lastBpm  = settings.value("LastBPM", 120.0, float)
                 del settings
                 if lastBpm >= 20.0:
                     self.host.transport_bpm(lastBpm)
+            
+            # MCP server is now started at application startup, not tied to engine
+            
             return
 
         elif firstInit:
@@ -1063,6 +1112,7 @@ class HostWindow(QMainWindow):
         return True
 
     def engineStopFinal(self):
+        # MCP server stays running - it's independent of engine lifecycle
         patchcanvas.handleAllPluginsRemoved()
         self.killTimers()
 
@@ -1218,6 +1268,8 @@ class HostWindow(QMainWindow):
     def slot_handleProjectLoadFinishedCallback(self):
         self.fIsProjectLoading = False
         self.projectLoadingFinished(False)
+        # Clear unsaved changes flag after loading project
+        self.setProjectModified(False)
 
     # --------------------------------------------------------------------------------------------------------
     # Plugins
@@ -1532,6 +1584,10 @@ class HostWindow(QMainWindow):
 
         if pluginType == PLUGIN_LV2:
             self.fHasLoadedLv2Plugins = True
+        
+        # Mark project as modified
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     @pyqtSlot(int)
     def slot_handlePluginRemovedCallback(self, pluginId):
@@ -1567,6 +1623,16 @@ class HostWindow(QMainWindow):
             pitem.setPluginId(i)
 
         self.ui.act_plugin_remove_all.setEnabled(True)
+        
+        # Mark project as modified
+        if not self.fCurrentlyRemovingAllPlugins:
+            self.setProjectModified(True)
+    
+    @pyqtSlot(int, int, float)
+    def slot_handleParameterValueChangedCallback(self, pluginId, parameterId, value):
+        # Mark project as modified when parameters change
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     # --------------------------------------------------------------------------------------------------------
     # Canvas
@@ -1958,11 +2024,17 @@ class HostWindow(QMainWindow):
     def slot_handlePatchbayConnectionAddedCallback(self, connectionId, groupOutId, portOutId, groupInId, portInId):
         patchcanvas.connectPorts(connectionId, groupOutId, portOutId, groupInId, portInId)
         self.updateMiniCanvasLater()
+        # Mark project as modified
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     @pyqtSlot(int, int, int)
     def slot_handlePatchbayConnectionRemovedCallback(self, connectionId, portOutId, portInId):
         patchcanvas.disconnectPorts(connectionId)
         self.updateMiniCanvasLater()
+        # Mark project as modified
+        if not self.fIsProjectLoading:
+            self.setProjectModified(True)
 
     # --------------------------------------------------------------------------------------------------------
     # Settings
@@ -2736,6 +2808,67 @@ class HostWindow(QMainWindow):
         self.close()
 
     # --------------------------------------------------------------------------------------------------------
+    # MCP Server integration
+
+    def slot_startMcpServer(self):
+        """Start the MCP server"""
+        if not self.fMcpServerEnabled or self.fMcpServer is not None:
+            return
+        
+        try:
+            from carla_mcp import start_mcp_server
+            success = start_mcp_server(self.host, gui_instance=self)
+            if success:
+                self.fMcpServer = True
+                import sys
+                print("✅ MCP server started successfully", file=sys.stderr)
+            else:
+                import sys
+                print("❌ Failed to start MCP server", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"❌ Error starting MCP server: {e}", file=sys.stderr)
+
+    def slot_stopMcpServer(self):
+        """Stop the MCP server"""
+        if not self.fMcpServerEnabled or self.fMcpServer is None:
+            return
+        
+        try:
+            from carla_mcp import stop_mcp_server
+            stop_mcp_server()
+            self.fMcpServer = None
+            import sys
+            print("🛑 MCP server stopped", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"❌ Error stopping MCP server: {e}", file=sys.stderr)
+    
+    @pyqtSlot(str)
+    def _slot_mcpProjectSaved(self, filename):
+        """Called from MCP thread after a project save"""
+        self.fProjectFilename = QFileInfo(filename).absoluteFilePath()
+        self.setProperWindowTitle()
+        self.setProjectModified(False)
+
+    @pyqtSlot(str)
+    def _slot_mcpProjectLoaded(self, filename):
+        """Called from MCP thread after a project load"""
+        self.fProjectFilename = QFileInfo(filename).absoluteFilePath()
+        self.setProperWindowTitle()
+        self.setProjectModified(False)
+
+    def slot_logMcpStatus(self):
+        """Log MCP server initialization status"""
+        if self.fMcpServerEnabled:
+            self.ui.text_logs.appendPlainText("✅ MCP server module imported successfully")
+        else:
+            if self.fMcpImportError:
+                self.ui.text_logs.appendPlainText(f"❌ Failed to import MCP server module: {self.fMcpImportError}")
+            else:
+                self.ui.text_logs.appendPlainText("❌ MCP server module not found")
+
+    # --------------------------------------------------------------------------------------------------------
     # Internal stuff
 
     def getExtraPtr(self, plugin):
@@ -3037,6 +3170,26 @@ class HostWindow(QMainWindow):
             self.hideForNSM()
             self.host.nsm_ready(NSM_CALLBACK_HIDE_OPTIONAL_GUI)
             return
+        
+        # Check for unsaved changes
+        if self.fHasUnsavedChanges:
+            ret = CustomMessageBox(self, QMessageBox.Warning, self.tr("Unsaved Changes"),
+                                  self.tr("There are unsaved changes. Do you want to save them before closing?"),
+                                  "",
+                                  QMessageBox.Save|QMessageBox.Discard|QMessageBox.Cancel,
+                                  QMessageBox.Save)
+            
+            if ret == QMessageBox.Save:
+                # Save project
+                self.slot_fileSave()
+                # If save was cancelled or failed, abort close
+                if self.fHasUnsavedChanges:
+                    event.ignore()
+                    return
+            elif ret == QMessageBox.Cancel:
+                event.ignore()
+                return
+            # QMessageBox.Discard - continue with close
 
         patchcanvas.handleAllPluginsRemoved()
 
@@ -3053,6 +3206,11 @@ class HostWindow(QMainWindow):
 
         self.killTimers()
         self.saveSettings()
+        
+        # Stop MCP server on application close (not engine stop)
+        if self.fMcpServerEnabled:
+            print("🛑 Stopping MCP server on application close...", file=sys.stderr)
+            self.slot_stopMcpServer()
 
         if self.host.is_engine_running() and not (self.host.isControl or self.host.isPlugin):
             if not self.slot_engineStop(True):

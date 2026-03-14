@@ -111,7 +111,7 @@ public:
     void process(CarlaEngine::ProtectedData* data, const float* const* inBuf, float* const* outBuf, uint32_t frames);
 
     // special direct process with connections already handled, used in JACK and Plugin
-    void processRack(CarlaEngine::ProtectedData* data, const float* inBuf[2], float* outBuf[2], uint32_t frames);
+    void processRack(CarlaEngine::ProtectedData* data, const float* inBuf[], float* outBuf[], uint32_t frames, uint32_t channels = 2);
 
     // used for internal patchbay mode
     void addPlugin(CarlaPluginPtr plugin);

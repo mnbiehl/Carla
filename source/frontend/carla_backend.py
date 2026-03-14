@@ -356,6 +356,9 @@ CUSTOM_DATA_TYPE_PROPERTY = "http://kxstudio.sf.net/ns/carla/property"
 # String type URI.
 CUSTOM_DATA_TYPE_STRING = "http://kxstudio.sf.net/ns/carla/string"
 
+# Path type URI.
+CUSTOM_DATA_TYPE_PATH = "http://kxstudio.sf.net/ns/carla/path"
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Custom Data Keys
 # Pre-defined keys used internally in Carla.
@@ -1024,6 +1027,9 @@ ENGINE_OPTION_CLIENT_NAME_PREFIX = 34
 
 # Treat loaded plugins as standalone (that is, there is no host UI to manage them)
 ENGINE_OPTION_PLUGINS_ARE_STANDALONE = 35
+
+# Enable parallel processing of plugins in rack mode
+ENGINE_OPTION_PARALLEL_PROCESSING = 36
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Engine Process Mode

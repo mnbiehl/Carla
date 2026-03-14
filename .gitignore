@@ -1,5 +1,6 @@
 # Hidden files
 .directory
+.serena/
 .fuse-*
 .*.kate-swp
 .libmagic-tmp

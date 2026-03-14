@@ -1,0 +1,10 @@
+prefix=/usr/local
+libdir=/usr/local/lib
+includedir=/usr/local/include
+carla_libdir=${libdir}/carla
+
+Name: carla-host-plugin
+Version: 2.6.0-alpha1
+Description: Carla Host as Native Plugin
+Libs: -Wl,-rpath,${carla_libdir} -L${carla_libdir} -lcarla_host-plugin
+Cflags: -I${includedir}/carla -I${includedir}/carla/includes

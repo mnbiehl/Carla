@@ -974,6 +974,11 @@ void carla_set_engine_option(CarlaHostHandle handle, EngineOption option, int va
             CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
             shandle.engineOptions.pluginsAreStandalone = (value != 0);
             break;
+
+        case CB::ENGINE_OPTION_PARALLEL_PROCESSING:
+            CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
+            shandle.engineOptions.parallelProcessing = (value != 0);
+            break;
         }
     }
 

@@ -36,6 +36,9 @@
 #define URI_TYPE_INTEGER "http://www.w3.org/2001/XMLSchema#integer"
 #define URI_TYPE_STRING  "text/plain"
 
+// Maximum number of rack audio channels (inputs and outputs)
+#define MAX_RACK_AUDIO_CHANNELS 16
+
 CARLA_BACKEND_START_NAMESPACE
 
 class CarlaEngineJack;
@@ -1536,12 +1539,24 @@ public:
 
         if (opts.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK || opts.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
         {
-            fRackPorts[kRackPortAudioIn1]  = jackbridge_port_register(fClient, "audio-in1",  JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioIn2]  = jackbridge_port_register(fClient, "audio-in2",  JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            fRackPorts[kRackPortAudioOut1] = jackbridge_port_register(fClient, "audio-out1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortAudioOut2] = jackbridge_port_register(fClient, "audio-out2", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            fRackPorts[kRackPortEventIn]   = jackbridge_port_register(fClient, "events-in",  JACK_DEFAULT_MIDI_TYPE,  JackPortIsInput, 0);
-            fRackPorts[kRackPortEventOut]  = jackbridge_port_register(fClient, "events-out", JACK_DEFAULT_MIDI_TYPE,  JackPortIsOutput, 0);
+            // Register audio input ports (16 channels)
+            char portName[32];
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                std::snprintf(portName, 32, "audio-in%d", i + 1);
+                fRackPorts[kRackPortAudioIn1 + i] = jackbridge_port_register(fClient, portName, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+            }
+            
+            // Register audio output ports (16 channels)
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                std::snprintf(portName, 32, "audio-out%d", i + 1);
+                fRackPorts[kRackPortAudioOut1 + i] = jackbridge_port_register(fClient, portName, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+            }
+            
+            // Register MIDI ports
+            fRackPorts[kRackPortEventIn]  = jackbridge_port_register(fClient, "events-in",  JACK_DEFAULT_MIDI_TYPE, JackPortIsInput, 0);
+            fRackPorts[kRackPortEventOut] = jackbridge_port_register(fClient, "events-out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
 
             if (opts.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK)
             {
@@ -1550,7 +1565,7 @@ public:
             }
             else
             {
-                pData->graph.create(2, 2, 0, 0);
+                pData->graph.create(MAX_RACK_AUDIO_CHANNELS, MAX_RACK_AUDIO_CHANNELS, 0, 0);
                 // pData->graph.setUsingExternalHost(true);
                 // pData->graph.setUsingExternalOSC(true);
                 patchbayRefresh(true, false, false);
@@ -2911,28 +2926,31 @@ protected:
         {
             if (pData->aboutToClose)
             {
-                if (float* const audioOut1 = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut1], nframes))
-                    carla_zeroFloats(audioOut1, nframes);
-
-                if (float* const audioOut2 = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut2], nframes))
-                    carla_zeroFloats(audioOut2, nframes);
+                // Zero all output channels
+                for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+                {
+                    const int portIndex = kRackPortAudioOut1 + i;
+                    if (float* const audioOut = (float*)jackbridge_port_get_buffer(fRackPorts[portIndex], nframes))
+                        carla_zeroFloats(audioOut, nframes);
+                }
             }
             else if (pData->curPluginCount == 0)
             {
-                float* const audioIn1  = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn1], nframes);
-                float* const audioIn2  = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn2], nframes);
-                float* const audioOut1 = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut1], nframes);
-                float* const audioOut2 = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut2], nframes);
-
-                // assert buffers
-                CARLA_SAFE_ASSERT_RETURN(audioIn1 != nullptr,);
-                CARLA_SAFE_ASSERT_RETURN(audioIn2 != nullptr,);
-                CARLA_SAFE_ASSERT_RETURN(audioOut1 != nullptr,);
-                CARLA_SAFE_ASSERT_RETURN(audioOut2 != nullptr,);
-
-                // pass-through
-                carla_copyFloats(audioOut1, audioIn1, nframes);
-                carla_copyFloats(audioOut2, audioIn2, nframes);
+                // Pass-through all channels when no plugins are loaded
+                for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+                {
+                    const int inPortIndex = kRackPortAudioIn1 + i;
+                    const int outPortIndex = kRackPortAudioOut1 + i;
+                    
+                    float* const audioIn  = (float*)jackbridge_port_get_buffer(fRackPorts[inPortIndex], nframes);
+                    float* const audioOut = (float*)jackbridge_port_get_buffer(fRackPorts[outPortIndex], nframes);
+                    
+                    // Only pass-through if both buffers are valid
+                    if (audioIn != nullptr && audioOut != nullptr)
+                        carla_copyFloats(audioOut, audioIn, nframes);
+                    else if (audioOut != nullptr)
+                        carla_zeroFloats(audioOut, nframes);
+                }
 
                 // TODO pass-through MIDI as well
                 if (void* const eventOut = jackbridge_port_get_buffer(fRackPorts[kRackPortEventOut], nframes))
@@ -2964,22 +2982,39 @@ protected:
             CARLA_SAFE_ASSERT_RETURN(pData->events.out != nullptr,);
 
             // get buffers from jack
-            float* const audioIn1  = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn1], nframes);
-            float* const audioIn2  = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn2], nframes);
-            float* const audioOut1 = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut1], nframes);
-            float* const audioOut2 = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut2], nframes);
-            void* const  eventIn   = jackbridge_port_get_buffer(fRackPorts[kRackPortEventIn],  nframes);
-            void* const  eventOut  = jackbridge_port_get_buffer(fRackPorts[kRackPortEventOut], nframes);
+            float* audioIn[MAX_RACK_AUDIO_CHANNELS];
+            float* audioOut[MAX_RACK_AUDIO_CHANNELS];
+            
+            // Get all input buffers
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                audioIn[i] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioIn1 + i], nframes);
+            }
+            
+            // Get all output buffers
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                audioOut[i] = (float*)jackbridge_port_get_buffer(fRackPorts[kRackPortAudioOut1 + i], nframes);
+            }
+            
+            void* const eventIn  = jackbridge_port_get_buffer(fRackPorts[kRackPortEventIn],  nframes);
+            void* const eventOut = jackbridge_port_get_buffer(fRackPorts[kRackPortEventOut], nframes);
 
-            // assert buffers
-            CARLA_SAFE_ASSERT_RETURN(audioIn1 != nullptr,);
-            CARLA_SAFE_ASSERT_RETURN(audioIn2 != nullptr,);
-            CARLA_SAFE_ASSERT_RETURN(audioOut1 != nullptr,);
-            CARLA_SAFE_ASSERT_RETURN(audioOut2 != nullptr,);
+            // assert buffers - at least the first 2 channels must be valid
+            CARLA_SAFE_ASSERT_RETURN(audioIn[0] != nullptr,);
+            CARLA_SAFE_ASSERT_RETURN(audioIn[1] != nullptr,);
+            CARLA_SAFE_ASSERT_RETURN(audioOut[0] != nullptr,);
+            CARLA_SAFE_ASSERT_RETURN(audioOut[1] != nullptr,);
 
             // create audio buffers
-            const float* inBuf[2]  = { audioIn1, audioIn2 };
-            /**/  float* outBuf[2] = { audioOut1, audioOut2 };
+            const float* inBuf[MAX_RACK_AUDIO_CHANNELS];
+            /**/  float* outBuf[MAX_RACK_AUDIO_CHANNELS];
+            
+            for (int i = 0; i < MAX_RACK_AUDIO_CHANNELS; ++i)
+            {
+                inBuf[i] = audioIn[i];
+                outBuf[i] = audioOut[i];
+            }
 
             // initialize events
             carla_zeroStructs(pData->events.in,  kMaxEngineEventInternalCount);
@@ -3011,7 +3046,7 @@ protected:
 
             if (pData->options.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK)
             {
-                pData->graph.processRack(pData, inBuf, outBuf, nframes);
+                pData->graph.processRack(pData, inBuf, outBuf, nframes, MAX_RACK_AUDIO_CHANNELS);
             }
             else
             {
@@ -3584,11 +3619,39 @@ private:
     enum RackPorts {
         kRackPortAudioIn1  = 0,
         kRackPortAudioIn2  = 1,
-        kRackPortAudioOut1 = 2,
-        kRackPortAudioOut2 = 3,
-        kRackPortEventIn   = 4,
-        kRackPortEventOut  = 5,
-        kRackPortCount     = 6
+        kRackPortAudioIn3  = 2,
+        kRackPortAudioIn4  = 3,
+        kRackPortAudioIn5  = 4,
+        kRackPortAudioIn6  = 5,
+        kRackPortAudioIn7  = 6,
+        kRackPortAudioIn8  = 7,
+        kRackPortAudioIn9  = 8,
+        kRackPortAudioIn10 = 9,
+        kRackPortAudioIn11 = 10,
+        kRackPortAudioIn12 = 11,
+        kRackPortAudioIn13 = 12,
+        kRackPortAudioIn14 = 13,
+        kRackPortAudioIn15 = 14,
+        kRackPortAudioIn16 = 15,
+        kRackPortAudioOut1  = 16,
+        kRackPortAudioOut2  = 17,
+        kRackPortAudioOut3  = 18,
+        kRackPortAudioOut4  = 19,
+        kRackPortAudioOut5  = 20,
+        kRackPortAudioOut6  = 21,
+        kRackPortAudioOut7  = 22,
+        kRackPortAudioOut8  = 23,
+        kRackPortAudioOut9  = 24,
+        kRackPortAudioOut10 = 25,
+        kRackPortAudioOut11 = 26,
+        kRackPortAudioOut12 = 27,
+        kRackPortAudioOut13 = 28,
+        kRackPortAudioOut14 = 29,
+        kRackPortAudioOut15 = 30,
+        kRackPortAudioOut16 = 31,
+        kRackPortEventIn    = 32,
+        kRackPortEventOut   = 33,
+        kRackPortCount      = 34
     };
 
     jack_port_t* fRackPorts[kRackPortCount];

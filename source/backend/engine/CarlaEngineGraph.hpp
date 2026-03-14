@@ -152,7 +152,7 @@ struct RackGraph {
     bool getGroupAndPortIdFromFullName(const char* fullPortName, uint& groupId, uint& portId) const noexcept;
 
     // the base, where plugins run
-    void process(CarlaEngine::ProtectedData* data, const float* inBuf[2], float* outBuf[2], uint32_t frames);
+    void process(CarlaEngine::ProtectedData* data, const float* inBuf[], float* outBuf[], uint32_t frames, uint32_t channels = 2);
 
     // extended, will call process() in the middle
     void processHelper(CarlaEngine::ProtectedData* data, const float* const* inBuf, float* const* outBuf, uint32_t frames);
