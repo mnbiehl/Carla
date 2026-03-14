@@ -64,15 +64,28 @@ class JackRouter:
         return RouteResult(success=True)
 
     def list_connections(self, filter_prefixes: List[str] = None) -> List[Tuple[str, str]]:
-        result = self._run_pw_link("-l", "-I")
+        """List active connections. Parses pw-link -l output format.
+
+        pw-link -l output looks like:
+            PortName:output
+              |-> DestName:input
+            PortName2:output
+              |-> DestName2:input
+        """
+        result = self._run_pw_link("-o", "-l")
         if result.returncode != 0:
             return []
         connections = []
+        current_output = None
         for line in result.stdout.strip().split("\n"):
-            if " -> " in line:
-                parts = line.strip().split(" -> ", 1)
-                if len(parts) == 2:
-                    src, dst = parts[0].strip(), parts[1].strip()
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "|-> " in stripped:
+                # This is a connection from current_output to a destination
+                dest = stripped.split("|-> ", 1)[1].strip()
+                if current_output:
+                    src, dst = current_output, dest
                     if filter_prefixes:
                         if not any(
                             src.startswith(p) or dst.startswith(p)
@@ -80,4 +93,7 @@ class JackRouter:
                         ):
                             continue
                     connections.append((src, dst))
+            elif "|<- " not in stripped:
+                # This is a port name (not an incoming connection line)
+                current_output = stripped
         return connections
