@@ -75,7 +75,7 @@ async def _start_carla() -> str:
     global _carla_process, _carla_log_file
 
     if _is_carla_running() or _is_carla_reachable():
-        count = await discover_and_register(bridge, CARLA_SSE_URL)
+        count = await discover_and_register(bridge, CARLA_SSE_URL, prefix="carla")
         src = f"managed (PID {_carla_process.pid})" if _is_carla_running() else "external"
         return f"Carla is already running ({src}). {count} tools registered."
 
@@ -98,7 +98,7 @@ async def _start_carla() -> str:
         if _is_carla_reachable():
             # Carla may accept connections before tools are registered; retry briefly
             for _ in range(5):
-                count = await discover_and_register(bridge, CARLA_SSE_URL)
+                count = await discover_and_register(bridge, CARLA_SSE_URL, prefix="carla")
                 if count > 0:
                     break
                 await asyncio.sleep(1)
@@ -117,7 +117,7 @@ async def _stop_carla() -> str:
         _carla_process = None
         return "No managed Carla process to stop."
 
-    unregister_all(bridge)
+    unregister_all(bridge, prefix="carla")
     _carla_process.terminate()
     try:
         _carla_process.wait(timeout=5)
