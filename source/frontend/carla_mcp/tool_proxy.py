@@ -45,7 +45,7 @@ async def _forward_tool_call(
                         parts.append(str(content))
                 return "\n".join(parts) if parts else "OK"
     except Exception as e:
-        return f"Error calling '{tool_name}': {e}\n\nIs Carla running? Use carla_start to check."
+        return f"Error calling '{tool_name}': {e}\n\nIs the backend running? Check with carla_status or looper_status."
 
 
 def _build_tool_function(

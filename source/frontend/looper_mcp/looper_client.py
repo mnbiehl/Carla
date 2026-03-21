@@ -29,6 +29,7 @@ class LooperClient:
             return json.loads(line.decode())
         finally:
             writer.close()
+            await writer.wait_closed()
 
     async def send_command(self, command) -> dict:
         """Send a Command (serde JSON) to looperdooper. Returns response dict."""

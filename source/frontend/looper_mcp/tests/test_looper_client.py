@@ -15,6 +15,7 @@ async def test_send_command_returns_ok():
     mock_writer.write = MagicMock()
     mock_writer.drain = AsyncMock()
     mock_writer.close = MagicMock()
+    mock_writer.wait_closed = AsyncMock()
     with patch("looper_mcp.looper_client.asyncio.open_connection",
                return_value=(mock_reader, mock_writer)):
         result = await client.send_command({"Start": None})
@@ -31,6 +32,7 @@ async def test_send_command_returns_error():
     mock_writer.write = MagicMock()
     mock_writer.drain = AsyncMock()
     mock_writer.close = MagicMock()
+    mock_writer.wait_closed = AsyncMock()
     with patch("looper_mcp.looper_client.asyncio.open_connection",
                return_value=(mock_reader, mock_writer)):
         result = await client.send_command({"Bad": None})
@@ -48,6 +50,7 @@ async def test_get_state_returns_snapshot():
     mock_writer.write = MagicMock()
     mock_writer.drain = AsyncMock()
     mock_writer.close = MagicMock()
+    mock_writer.wait_closed = AsyncMock()
     with patch("looper_mcp.looper_client.asyncio.open_connection",
                return_value=(mock_reader, mock_writer)):
         result = await client.get_state()
