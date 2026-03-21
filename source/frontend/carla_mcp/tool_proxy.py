@@ -101,10 +101,13 @@ def _build_tool_function(
 _registered_tools: set[str] = set()
 
 
-def unregister_all(bridge) -> int:
-    """Remove all previously registered proxy tools from the bridge."""
+def unregister_all(bridge, prefix: str = "") -> int:
+    """Remove proxy tools from the bridge, optionally filtered by prefix."""
     count = 0
+    prefix_str = f"{prefix}_" if prefix else ""
     for tool_name in list(_registered_tools):
+        if prefix_str and not tool_name.startswith(prefix_str):
+            continue
         try:
             bridge.remove_tool(tool_name)
             count += 1
@@ -114,11 +117,12 @@ def unregister_all(bridge) -> int:
     return count
 
 
-async def discover_and_register(bridge, sse_url: str) -> int:
-    """Discover tools from Carla SSE and register them with the bridge.
+async def discover_and_register(bridge, sse_url: str, prefix: str = "") -> int:
+    """Discover tools from an MCP backend and register them with optional prefix.
 
     Returns the number of tools registered, or 0 on connection error.
     """
+    prefix_str = f"{prefix}_" if prefix else ""
     try:
         async with sse_client(sse_url) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
@@ -126,16 +130,17 @@ async def discover_and_register(bridge, sse_url: str) -> int:
                 result = await session.list_tools()
 
                 for tool in result.tools:
+                    registered_name = f"{prefix_str}{tool.name}"
                     fn = _build_tool_function(
                         tool.name, tool.inputSchema, sse_url
                     )
                     tool_obj = Tool.from_function(
-                        fn, name=tool.name, description=tool.description
+                        fn, name=registered_name, description=tool.description
                     )
                     bridge.add_tool(tool_obj)
-                    _registered_tools.add(tool.name)
+                    _registered_tools.add(registered_name)
 
                 return len(result.tools)
     except Exception as e:
-        logger.warning("Failed to discover Carla tools: %s", e)
+        logger.warning("Failed to discover tools from %s: %s", sse_url, e)
         return 0

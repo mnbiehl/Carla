@@ -158,6 +158,55 @@ async def test_discover_returns_zero_on_connection_error():
 
 
 @pytest.mark.asyncio
+async def test_discover_registers_tools_with_prefix():
+    """Tools registered via discover_and_register with a prefix get prefixed names."""
+    mock_bridge = MagicMock()
+    mock_bridge.add_tool = MagicMock()
+    mock_tools = [
+        _make_mock_tool(
+            "search_plugins",
+            "Search for plugins",
+            {"properties": {"query": {"type": "string"}}, "required": ["query"]},
+        ),
+    ]
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.tools = mock_tools
+    mock_session.list_tools = AsyncMock(return_value=mock_result)
+    mock_session.initialize = AsyncMock()
+    with patch("carla_mcp.tool_proxy.sse_client") as mock_sse:
+        mock_sse.return_value.__aenter__ = AsyncMock(
+            return_value=(AsyncMock(), AsyncMock())
+        )
+        with patch("carla_mcp.tool_proxy.ClientSession") as mock_cs:
+            mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_sse.return_value.__aexit__ = AsyncMock(return_value=False)
+            count = await discover_and_register(
+                mock_bridge, "http://localhost:3001/sse", prefix="carla"
+            )
+    assert count == 1
+    # Verify the tool was registered with the prefixed name
+    tool_obj = mock_bridge.add_tool.call_args[0][0]
+    assert tool_obj.name == "carla_search_plugins"
+
+
+@pytest.mark.asyncio
+async def test_unregister_by_prefix():
+    """unregister_all with a prefix only removes tools with that prefix."""
+    mock_bridge = MagicMock()
+    mock_bridge.remove_tool = MagicMock()
+    _registered_tools.clear()
+    _registered_tools.update({
+        "carla_search_plugins", "carla_list_plugins",
+        "looper_record", "looper_play",
+    })
+    removed = unregister_all(mock_bridge, prefix="carla")
+    assert removed == 2
+    assert _registered_tools == {"looper_record", "looper_play"}
+
+
+@pytest.mark.asyncio
 async def test_discover_clears_previous_on_rediscovery():
     mock_bridge = MagicMock()
     mock_bridge.add_tool = MagicMock()
