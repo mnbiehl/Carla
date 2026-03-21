@@ -25,12 +25,15 @@ Usage in .mcp.json:
 
 import asyncio
 import atexit
+import json
 import os
 import sys
 import subprocess
 from pathlib import Path
 
 from fastmcp import FastMCP
+from mcp.client.sse import sse_client
+from mcp import ClientSession
 
 from carla_mcp.tool_proxy import discover_and_register, unregister_all
 
@@ -48,6 +51,24 @@ LOOPER_MCP_PORT = os.getenv("LOOPER_MCP_PORT", "3002")
 LOOPER_MCP_HOST = os.getenv("LOOPER_MCP_HOST", "127.0.0.1")
 LOOPER_SSE_URL = f"http://{LOOPER_MCP_HOST}:{LOOPER_MCP_PORT}/sse"
 LOOPER_MCP_SCRIPT = _THIS_DIR.parent / "looper_mcp" / "main.py"
+
+RIG_SESSION_DIR = Path.home() / ".config" / "rig-sessions"
+
+
+def _build_rig_manifest(
+    carla_running: bool,
+    looper_running: bool,
+    carla_session: str = "",
+    looper_session: str = "",
+) -> dict:
+    return {
+        "version": 1,
+        "backends": {
+            "carla": {"running": carla_running, "session": carla_session},
+            "looper": {"running": looper_running, "session": looper_session},
+        },
+    }
+
 
 bridge = FastMCP("Carla MCP Bridge")
 
@@ -301,6 +322,120 @@ async def looper_status() -> str:
         return f"Looper process running (PID {_looper_process.pid}) but MCP not reachable yet."
     else:
         return "Looper is not running. Use looper_start to launch it."
+
+
+@bridge.tool()
+async def save_rig_session(name: str) -> str:
+    """Save the full rig session (Carla + looper state + routing manifest)."""
+    session_dir = RIG_SESSION_DIR / name
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    messages = []
+
+    # Save Carla project if running
+    carla_session = ""
+    if _is_carla_reachable():
+        carla_path = str(session_dir / "carla_project.carxp")
+        try:
+            async with sse_client(CARLA_SSE_URL) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    await session.call_tool("save_project", {"filename": carla_path})
+            carla_session = carla_path
+            messages.append(f"Carla session saved to {carla_path}")
+        except Exception as e:
+            messages.append(f"Failed to save Carla session: {e}")
+
+    # Save looper session if running
+    looper_session = ""
+    if _is_looper_reachable():
+        looper_path = str(session_dir / "looper_session.json")
+        try:
+            async with sse_client(LOOPER_SSE_URL) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    await session.call_tool("save_session", {"path": looper_path})
+            looper_session = looper_path
+            messages.append(f"Looper session saved to {looper_path}")
+        except Exception as e:
+            messages.append(f"Failed to save looper session: {e}")
+
+    # Save rig manifest
+    manifest = _build_rig_manifest(
+        carla_running=_is_carla_reachable(),
+        looper_running=_is_looper_reachable(),
+        carla_session=carla_session,
+        looper_session=looper_session,
+    )
+    manifest_path = session_dir / "rig_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    messages.append(f"Rig manifest saved to {manifest_path}")
+
+    return "\n".join(messages)
+
+
+@bridge.tool()
+async def load_rig_session(name: str) -> str:
+    """Load a saved rig session (starts backends if needed, restores state)."""
+    session_dir = RIG_SESSION_DIR / name
+    manifest_path = session_dir / "rig_manifest.json"
+
+    if not manifest_path.exists():
+        return f"No rig session found at {session_dir}"
+
+    manifest = json.loads(manifest_path.read_text())
+    messages = []
+
+    carla_cfg = manifest.get("backends", {}).get("carla", {})
+    if carla_cfg.get("session"):
+        if not _is_carla_reachable():
+            messages.append(await _start_carla())
+        try:
+            async with sse_client(CARLA_SSE_URL) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    await session.call_tool(
+                        "load_project", {"filename": carla_cfg["session"]}
+                    )
+            messages.append("Carla session loaded.")
+        except Exception as e:
+            messages.append(f"Failed to load Carla session: {e}")
+
+    looper_cfg = manifest.get("backends", {}).get("looper", {})
+    if looper_cfg.get("session"):
+        if not _is_looper_reachable():
+            messages.append(await _start_looper())
+        try:
+            async with sse_client(LOOPER_SSE_URL) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    await session.call_tool(
+                        "load_session", {"path": looper_cfg["session"]}
+                    )
+            messages.append("Looper session loaded.")
+        except Exception as e:
+            messages.append(f"Failed to load looper session: {e}")
+
+    return "\n".join(messages) if messages else "Nothing to load."
+
+
+@bridge.tool()
+async def list_rig_sessions() -> str:
+    """List all saved rig sessions."""
+    if not RIG_SESSION_DIR.exists():
+        return "No rig sessions saved yet."
+    sessions = sorted(d.name for d in RIG_SESSION_DIR.iterdir() if d.is_dir())
+    if not sessions:
+        return "No rig sessions saved yet."
+    return "Saved rig sessions:\n" + "\n".join(f"  - {s}" for s in sessions)
+
+
+@bridge.tool()
+async def get_rig_status() -> str:
+    """Get the status of all rig backends (Carla and looper)."""
+    carla_msg = await carla_status()
+    looper_msg = await looper_status()
+    return f"=== Carla ===\n{carla_msg}\n\n=== Looper ===\n{looper_msg}"
 
 
 def _atexit_cleanup():
