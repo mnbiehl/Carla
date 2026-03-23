@@ -75,9 +75,16 @@ bridge = FastMCP("Carla MCP Bridge")
 _carla_process: subprocess.Popen | None = None
 _carla_log_file = None
 
+# Looper engine (Rust binary) configuration
+LOOPERS_PATH = os.getenv("LOOPERS_PATH", str(Path(__file__).resolve().parent.parent.parent.parent / "looperdooper" / "target" / "release" / "loopers"))
+
 # Track the Looper MCP process we launched
 _looper_process: subprocess.Popen | None = None
 _looper_log_file = None
+
+# Track the Looper engine process (Rust binary)
+_looper_engine_process: subprocess.Popen | None = None
+_looper_engine_log_file = None
 
 
 def _is_carla_running() -> bool:
@@ -204,13 +211,21 @@ async def carla_status() -> str:
 
 
 def _is_looper_running() -> bool:
-    """Check if our managed Looper MCP process is running."""
-    global _looper_process
+    """Check if both the Looper engine and MCP processes are running."""
+    global _looper_process, _looper_engine_process
+    mcp_alive = False
+    engine_alive = False
     if _looper_process is not None:
         if _looper_process.poll() is None:
-            return True
-        _looper_process = None
-    return False
+            mcp_alive = True
+        else:
+            _looper_process = None
+    if _looper_engine_process is not None:
+        if _looper_engine_process.poll() is None:
+            engine_alive = True
+        else:
+            _looper_engine_process = None
+    return mcp_alive and engine_alive
 
 
 def _is_looper_reachable() -> bool:
@@ -224,8 +239,9 @@ def _is_looper_reachable() -> bool:
 
 
 async def _start_looper() -> str:
-    """Start the Looper MCP server (internal helper)."""
+    """Start the Looper engine and MCP server (internal helper)."""
     global _looper_process, _looper_log_file
+    global _looper_engine_process, _looper_engine_log_file
 
     if _is_looper_running() or _is_looper_reachable():
         count = await discover_and_register(bridge, LOOPER_SSE_URL, prefix="looper")
@@ -235,6 +251,42 @@ async def _start_looper() -> str:
     env = os.environ.copy()
     env["LOOPER_MCP_PORT"] = str(LOOPER_MCP_PORT)
 
+    # Step 1: Launch the loopers audio engine via pw-jack
+    _looper_engine_log_file = open("/tmp/looper-engine.log", "w")
+    _looper_engine_process = subprocess.Popen(
+        ["pw-jack", LOOPERS_PATH],
+        env=env,
+        stdout=_looper_engine_log_file,
+        stderr=_looper_engine_log_file,
+    )
+
+    # Poll for JACK ports to appear (1s interval, 10s timeout)
+    engine_ready = False
+    for _ in range(10):
+        await asyncio.sleep(1)
+        if _looper_engine_process.poll() is not None:
+            return (
+                f"Looper engine exited with code {_looper_engine_process.returncode}. "
+                "Check /tmp/looper-engine.log."
+            )
+        try:
+            result = subprocess.run(
+                ["pw-link", "-o"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if "loopers" in result.stdout or "looperdooper" in result.stdout:
+                engine_ready = True
+                break
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    if not engine_ready:
+        return (
+            f"Looper engine started (PID {_looper_engine_process.pid}) "
+            "but JACK ports did not appear within 10s."
+        )
+
+    # Step 2: Launch the looper MCP server
     _looper_log_file = open("/tmp/looper-mcp.log", "w")
     _looper_process = subprocess.Popen(
         ["uv", "run", "python3", str(LOOPER_MCP_SCRIPT)],
@@ -253,37 +305,65 @@ async def _start_looper() -> str:
                 if count > 0:
                     break
                 await asyncio.sleep(1)
-            return f"Looper started (PID {_looper_process.pid}). MCP server ready on port {LOOPER_MCP_PORT}. {count} tools registered."
+            return (
+                f"Looper engine (PID {_looper_engine_process.pid}) and "
+                f"MCP server (PID {_looper_process.pid}) ready on port {LOOPER_MCP_PORT}. "
+                f"{count} tools registered."
+            )
         if _looper_process.poll() is not None:
-            return f"Looper process exited with code {_looper_process.returncode}. Check /tmp/looper-mcp.log."
+            return f"Looper MCP process exited with code {_looper_process.returncode}. Check /tmp/looper-mcp.log."
 
-    return f"Looper started (PID {_looper_process.pid}) but MCP server not yet reachable. It may still be initializing."
+    return (
+        f"Looper engine (PID {_looper_engine_process.pid}) running. "
+        f"MCP server (PID {_looper_process.pid}) not yet reachable. It may still be initializing."
+    )
 
 
 async def _stop_looper() -> str:
-    """Stop the Looper MCP server (internal helper)."""
+    """Stop the Looper MCP server and engine (internal helper)."""
     global _looper_process, _looper_log_file
+    global _looper_engine_process, _looper_engine_log_file
 
-    if _looper_process is None or _looper_process.poll() is not None:
+    messages = []
+
+    # Stop MCP server first
+    if _looper_process is not None and _looper_process.poll() is None:
+        unregister_all(bridge, prefix="looper")
+        _looper_process.terminate()
+        try:
+            _looper_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _looper_process.kill()
+            _looper_process.wait()
+        messages.append(f"Looper MCP stopped (PID {_looper_process.pid}).")
         _looper_process = None
-        return "No managed Looper process to stop."
-
-    unregister_all(bridge, prefix="looper")
-    _looper_process.terminate()
-    try:
-        _looper_process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _looper_process.kill()
-        _looper_process.wait()
-
-    pid = _looper_process.pid
-    _looper_process = None
+    else:
+        _looper_process = None
+        messages.append("No managed Looper MCP process to stop.")
 
     if _looper_log_file is not None:
         _looper_log_file.close()
         _looper_log_file = None
 
-    return f"Looper stopped (PID {pid})."
+    # Then stop the engine
+    if _looper_engine_process is not None and _looper_engine_process.poll() is None:
+        _looper_engine_process.terminate()
+        try:
+            _looper_engine_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _looper_engine_process.kill()
+            _looper_engine_process.wait()
+        messages.append(f"Looper engine stopped (PID {_looper_engine_process.pid}).")
+        _looper_engine_process = None
+    else:
+        _looper_engine_process = None
+        messages.append("No managed Looper engine process to stop.")
+
+    if _looper_engine_log_file is not None:
+        _looper_engine_log_file.close()
+        _looper_engine_log_file = None
+
+    return " ".join(messages)
 
 
 @bridge.tool()
@@ -463,6 +543,19 @@ def _atexit_cleanup():
     if _looper_log_file is not None:
         _looper_log_file.close()
         _looper_log_file = None
+
+    global _looper_engine_process, _looper_engine_log_file
+    if _looper_engine_process is not None and _looper_engine_process.poll() is None:
+        _looper_engine_process.terminate()
+        try:
+            _looper_engine_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _looper_engine_process.kill()
+            _looper_engine_process.wait()
+        _looper_engine_process = None
+    if _looper_engine_log_file is not None:
+        _looper_engine_log_file.close()
+        _looper_engine_log_file = None
 
 
 atexit.register(_atexit_cleanup)
