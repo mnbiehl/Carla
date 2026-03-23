@@ -39,6 +39,7 @@ from .tools.routing import register_routing_tools
 from .tools.auto_gain import register_auto_gain_tools
 from .tools.system import register_system_tools
 from .tools.orchestration import register_orchestration_tools
+from .tools.chain_builder import register_chain_builder_tools
 
 # Import resource registration functions
 from .resources.status import register_status_resources
@@ -151,10 +152,13 @@ def register_all_tools(backend_bridge):
     
     # Register auto-gain tools
     register_auto_gain_tools(mcp_server, backend_bridge)
-    
+
     # Register system configuration tools
     register_system_tools(mcp_server, backend_bridge)
-    
+
+    # Register chain builder tools
+    register_chain_builder_tools(mcp_server, backend_bridge)
+
     logger.info("All tools registered successfully")
 
 
