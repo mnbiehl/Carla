@@ -88,35 +88,50 @@ class CarlaDiscoveryParser:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
     
-    def discover_plugin(self, plugin_type: str, plugin_path: str) -> Optional[PluginInfo]:
+    def discover_plugins(self, plugin_type: str, plugin_path: str) -> List[PluginInfo]:
         """
-        Discover a single plugin using carla-discovery-native
-        
+        Discover all plugins in a file/bundle using carla-discovery-native
+
         Args:
             plugin_type: Plugin type (lv2, ladspa, vst2, vst3, etc.)
             plugin_path: Path to plugin file or bundle
-            
+
+        Returns:
+            List of PluginInfo objects (empty list if discovery failed)
+        """
+        try:
+            cmd = [self.DISCOVERY_TOOL_PATH, plugin_type.lower(), plugin_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                self.logger.warning(f"Discovery failed for {plugin_path}: {result.stderr}")
+                return []
+
+            return self._parse_discovery_output_multi(result.stdout, plugin_type, plugin_path)
+
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Discovery timeout for {plugin_path}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Discovery error for {plugin_path}: {e}")
+            return []
+
+    def discover_plugin(self, plugin_type: str, plugin_path: str) -> Optional[PluginInfo]:
+        """
+        Discover a single plugin using carla-discovery-native
+
+        Backward-compatible method that returns the first plugin found.
+        For bundles with multiple plugins, use discover_plugins() instead.
+
+        Args:
+            plugin_type: Plugin type (lv2, ladspa, vst2, vst3, etc.)
+            plugin_path: Path to plugin file or bundle
+
         Returns:
             PluginInfo object or None if discovery failed
         """
-        try:
-            # Run carla-discovery-native
-            cmd = [self.DISCOVERY_TOOL_PATH, plugin_type.lower(), plugin_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode != 0:
-                self.logger.warning(f"Discovery failed for {plugin_path}: {result.stderr}")
-                return None
-            
-            # Parse the output
-            return self._parse_discovery_output(result.stdout, plugin_type, plugin_path)
-            
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"Discovery timeout for {plugin_path}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Discovery error for {plugin_path}: {e}")
-            return None
+        results = self.discover_plugins(plugin_type, plugin_path)
+        return results[0] if results else None
     
     def _parse_discovery_output(self, output: str, plugin_type: str, plugin_path: str) -> Optional[PluginInfo]:
         """
@@ -209,6 +224,42 @@ class CarlaDiscoveryParser:
             self.logger.error(f"Error parsing discovery output for {plugin_path}: {e}")
             return None
     
+    def _parse_discovery_output_multi(self, output: str, plugin_type: str, plugin_path: str) -> List[PluginInfo]:
+        """
+        Parse carla-discovery-native output that may contain multiple plugins.
+
+        Splits on 'carla-discovery::init::' markers and parses each chunk
+        using _parse_discovery_output().
+
+        Args:
+            output: Raw output from discovery tool
+            plugin_type: Plugin type
+            plugin_path: Plugin path
+
+        Returns:
+            List of PluginInfo objects
+        """
+        if not output or not output.strip():
+            return []
+
+        # Split on init markers. Each chunk (after the first split) is one plugin.
+        marker = "carla-discovery::init::"
+        chunks = output.split(marker)
+
+        results = []
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+
+            # Re-add the marker so _parse_discovery_output sees valid lines
+            full_chunk = marker + chunk
+            info = self._parse_discovery_output(full_chunk, plugin_type, plugin_path)
+            if info is not None:
+                results.append(info)
+
+        return results
+
     def get_plugin_categories(self) -> List[str]:
         """Get list of known plugin categories"""
         return [

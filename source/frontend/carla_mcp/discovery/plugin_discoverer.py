@@ -129,21 +129,21 @@ class PluginDiscoverer:
         
         self.logger.info(f"Discovering {len(plugin_paths)} {plugin_type.upper()} plugins...")
         
-        # Discover plugins in parallel
+        # Discover plugins in parallel (each path may yield multiple plugins)
         discovered_count = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit discovery tasks
+            # Submit discovery tasks - use discover_plugins (plural)
             future_to_path = {
-                executor.submit(self.parser.discover_plugin, plugin_type, path): path
+                executor.submit(self.parser.discover_plugins, plugin_type, path): path
                 for path in plugin_paths
             }
-            
-            # Process results
+
+            # Process results - each future returns a list of PluginInfo
             for future in as_completed(future_to_path):
                 path = future_to_path[future]
                 try:
-                    plugin_info = future.result()
-                    if plugin_info:
+                    plugin_infos = future.result()
+                    for plugin_info in plugin_infos:
                         self.database.add_plugin(plugin_info)
                         discovered_count += 1
                 except Exception as e:
