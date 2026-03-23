@@ -32,7 +32,7 @@ class CarlaInstance:
 class InstanceManager:
     """Manages multiple Carla instances."""
 
-    def __init__(self, base_mcp_port: int = 3002):
+    def __init__(self, base_mcp_port: int = 3003):
         self._instances: Dict[str, CarlaInstance] = {}
         self._base_mcp_port = base_mcp_port
         self._next_port = base_mcp_port

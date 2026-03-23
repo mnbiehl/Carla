@@ -51,31 +51,31 @@ class TestInstanceManagerPortAllocation:
 
     def test_allocates_sequential_ports(self):
         """Ports are allocated sequentially from base."""
-        mgr = InstanceManager(base_mcp_port=3002)
-        assert mgr.allocate_port() == 3002
+        mgr = InstanceManager(base_mcp_port=3003)
         assert mgr.allocate_port() == 3003
+        assert mgr.allocate_port() == 3004
 
     def test_reclaims_released_ports(self):
         """Released ports are reused before allocating new ones."""
-        mgr = InstanceManager(base_mcp_port=3002)
+        mgr = InstanceManager(base_mcp_port=3003)
         port = mgr.allocate_port()
         mgr.release_port(port)
-        assert mgr.allocate_port() == 3002
+        assert mgr.allocate_port() == 3003
 
     def test_release_then_allocate_multiple(self):
         """Multiple released ports are all reusable."""
-        mgr = InstanceManager(base_mcp_port=3002)
+        mgr = InstanceManager(base_mcp_port=3003)
         p1 = mgr.allocate_port()
         p2 = mgr.allocate_port()
         mgr.release_port(p1)
         mgr.release_port(p2)
         reclaimed = {mgr.allocate_port(), mgr.allocate_port()}
-        assert reclaimed == {3002, 3003}
+        assert reclaimed == {3003, 3004}
 
     def test_default_base_port(self):
-        """Default base port is 3002."""
+        """Default base port is 3003 (3002 reserved for looper)."""
         mgr = InstanceManager()
-        assert mgr.allocate_port() == 3002
+        assert mgr.allocate_port() == 3003
 
 
 class TestInstanceManagerLifecycle:
