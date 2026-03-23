@@ -8,6 +8,8 @@ from ..state.instance_manager import CarlaInstance, InstanceManager
 
 logger = logging.getLogger(__name__)
 
+CARLA_PYTHON_PATH = os.getenv("CARLA_PYTHON_PATH", "/usr/bin/python3")
+
 
 class ChainLauncher:
     """Spawns Carla instances as separate processes."""
@@ -40,7 +42,7 @@ class ChainLauncher:
         log_file = open(f"/tmp/carla-chain-{name}.log", "w")
         self._log_files[name] = log_file
         proc = subprocess.Popen(
-            ["pw-jack", "/usr/bin/python3", self._carla_script],
+            ["pw-jack", CARLA_PYTHON_PATH, self._carla_script],
             env=env,
             cwd=os.path.dirname(self._carla_script),
             stdout=log_file,
