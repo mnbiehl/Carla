@@ -7,6 +7,7 @@ backend access with the same capabilities as the native Carla interface.
 """
 
 import logging
+import time
 from typing import Optional, Dict, Any, List
 from ..utils.error_handler import get_error_handler
 from ..constants import (
@@ -217,7 +218,13 @@ class CarlaBackendBridge:
             
             # Use the discovered plugin info to add with correct metadata
             success, details = self._add_plugin_from_database(plugin_info)
-            if not success:
+            if success:
+                time.sleep(0.1)
+                try:
+                    self.host.patchbay_refresh(False)
+                except Exception:
+                    pass
+            else:
                 self.logger.error(f"Failed to add plugin '{plugin_name}' using database metadata")
             return success, details
             
@@ -390,6 +397,11 @@ class CarlaBackendBridge:
             success = self.host.remove_plugin(plugin_id)
             if success:
                 self.logger.info(f"Successfully removed plugin {plugin_id}")
+                time.sleep(0.1)
+                try:
+                    self.host.patchbay_refresh(False)
+                except Exception:
+                    pass
             else:
                 self.logger.error(f"Failed to remove plugin {plugin_id}")
             return success
