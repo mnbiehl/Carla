@@ -41,9 +41,8 @@ CARLA_PORT = os.getenv("CARLA_MCP_PORT", "3001")
 CARLA_HOST = os.getenv("CARLA_MCP_HOST", "127.0.0.1")
 CARLA_SSE_URL = f"http://{CARLA_HOST}:{CARLA_PORT}/sse"
 
-# Path to carla.py - relative to this file
+# Path constants
 _THIS_DIR = Path(__file__).resolve().parent
-CARLA_SCRIPT = _THIS_DIR.parent / "carla.py"
 CARLA_FRONTEND_DIR = _THIS_DIR.parent
 
 # Looper MCP server configuration
@@ -113,12 +112,11 @@ async def _start_carla() -> str:
     env = os.environ.copy()
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
 
-    # Use /usr/bin/python3 (system Python with PyQt5), not the venv python
+    # Launch carla-control (connects to our already-running engine as a viewer)
     _carla_log_file = open("/tmp/carla-mcp.log", "w")
     _carla_process = subprocess.Popen(
-        ["pw-jack", "/usr/bin/python3", str(CARLA_SCRIPT)],
+        ["pw-jack", "carla-control"],
         env=env,
-        cwd=str(CARLA_FRONTEND_DIR),
         stdout=_carla_log_file,
         stderr=_carla_log_file,
     )
