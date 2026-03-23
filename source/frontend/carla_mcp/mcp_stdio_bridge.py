@@ -516,6 +516,50 @@ async def get_rig_status() -> str:
     return f"=== Carla ===\n{carla_msg}\n\n=== Looper ===\n{looper_msg}"
 
 
+async def _start_rig() -> str:
+    """Start the full rig (internal helper)."""
+    messages = []
+
+    # Step 1: Start Carla (bridge engine + carla-control viewer)
+    carla_msg = await _start_carla()
+    messages.append(f"[Carla] {carla_msg}")
+
+    # Step 2: Start Looper (engine + MCP server)
+    looper_msg = await _start_looper()
+    messages.append(f"[Looper] {looper_msg}")
+
+    # Step 3: Create external pw-link connections
+    from carla_mcp.utils.pw_link import pw_link_connect, pw_link_verify
+
+    external_connections = [
+        # Scarlett -> Carla (live monitor)
+        ("alsa_input.usb-Focusrite_Scarlett_2i2_USB-00.pro-input-0:capture_AUX0", "Carla:audio-in1"),
+        ("alsa_input.usb-Focusrite_Scarlett_2i2_USB-00.pro-input-0:capture_AUX1", "Carla:audio-in2"),
+        # Carla -> Scarlett (monitoring output)
+        ("Carla:audio-out1", "alsa_output.usb-Focusrite_Scarlett_2i2_USB-00.pro-output-0:playback_AUX0"),
+        ("Carla:audio-out2", "alsa_output.usb-Focusrite_Scarlett_2i2_USB-00.pro-output-0:playback_AUX1"),
+    ]
+
+    conn_results = []
+    for src, dst in external_connections:
+        result = pw_link_connect(src, dst)
+        status = "OK" if result.success else f"FAIL: {result.message}"
+        conn_results.append(f"  {src} -> {dst}: {status}")
+    messages.append("[Connections]\n" + "\n".join(conn_results))
+
+    # Step 4: Verify connections
+    verified = sum(1 for src, dst in external_connections if pw_link_verify(src, dst))
+    messages.append(f"[Verify] {verified}/{len(external_connections)} connections verified")
+
+    return "\n\n".join(messages)
+
+
+@bridge.tool()
+async def start_rig() -> str:
+    """Start the full rig: Carla engine, carla-control GUI, loopers engine, looper MCP, and audio connections."""
+    return await _start_rig()
+
+
 def _atexit_cleanup():
     """Ensure Carla and Looper are terminated on exit."""
     global _carla_process, _carla_log_file
