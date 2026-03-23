@@ -443,6 +443,17 @@ class CarlaBackendBridge:
             self.logger.error(f"Error getting plugin info for {plugin_id}: {e}")
             return None
     
+    def get_audio_port_counts(self, plugin_id: int) -> tuple[int, int]:
+        """Get audio input and output counts for a plugin.
+        Returns: Tuple of (audio_ins, audio_outs). Defaults to (2, 2) on error.
+        """
+        try:
+            info = self.host.get_audio_port_count_info(plugin_id)
+            return (info.ins, info.outs)
+        except Exception as e:
+            self.logger.warning(f"Could not get audio port counts for plugin {plugin_id}: {e}")
+            return (2, 2)
+
     def get_all_plugins(self) -> List[Dict[str, Any]]:
         """Get information for all loaded plugins"""
         plugins = []

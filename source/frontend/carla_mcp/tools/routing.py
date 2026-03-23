@@ -25,7 +25,32 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
     
     # --------------------------------------------------------------------------------------------------------
     # Patchbay Mode and Routing Tools
-    
+
+    @mcp.tool()
+    def connect_patchbay_ports(group_a: int, port_a: int, group_b: int, port_b: int) -> str:
+        """
+        Connect two patchbay ports directly by group and port IDs.
+
+        Use debug_patchbay_groups to discover group/port IDs.
+        Output ports use offset 510+N, input ports use offset 255+N.
+        System Audio Input = group 1, Audio Output = group 2.
+
+        Args:
+            group_a: Source group ID
+            port_a: Source port ID
+            group_b: Destination group ID
+            port_b: Destination port ID
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available."
+        try:
+            if backend_bridge.patchbay_connect(group_a, port_a, group_b, port_b):
+                return f"✅ Connected group {group_a} port {port_a} → group {group_b} port {port_b}"
+            else:
+                return f"❌ Failed to connect group {group_a} port {port_a} → group {group_b} port {port_b}"
+        except Exception as e:
+            return f"❌ Error: {e}"
+
     @mcp.tool()
     def get_current_engine_mode() -> str:
         """
@@ -203,199 +228,273 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
     
 
     @mcp.tool()
-    def connect_plugins(source_plugin_id: int, dest_plugin_id: int, 
-                       source_channel: str = "stereo", dest_channel: str = "stereo") -> str:
+    def connect_plugins(source_plugin_id: int, dest_plugin_id: int,
+                       source_channel: str = "auto", dest_channel: str = "auto") -> str:
         """
         Connect audio output of one plugin to input of another
-        
+
         This is a simplified high-level API that handles all the complex
-        group ID and port offset calculations internally.
-        
+        group ID and port offset calculations internally. By default it
+        auto-detects mono/stereo from actual port counts.
+
         Args:
             source_plugin_id: Source plugin ID (0-based)
             dest_plugin_id: Destination plugin ID (0-based)
-            source_channel: "mono", "left", "right", or "stereo" (default)
-            dest_channel: "mono", "left", "right", or "stereo" (default)
-            
+            source_channel: "auto" (default), "mono", "left", "right", or "stereo"
+            dest_channel: "auto" (default), "mono", "left", "right", or "stereo"
+
         Returns:
             Status message
-            
+
         Examples:
-            connect_plugins(0, 1)  # Connect plugin 0 output to plugin 1 input (stereo)
-            connect_plugins(0, 1, "mono", "stereo")  # Mono to stereo connection
+            connect_plugins(0, 1)  # Auto-detect mono/stereo and connect
+            connect_plugins(0, 1, "mono", "stereo")  # Force mono to stereo
         """
         if not backend_bridge:
             return "❌ Backend API not available."
-        
+
         try:
             # Get backend group IDs for both plugins
             source_group = backend_bridge._plugin_to_group_map.get(source_plugin_id)
             dest_group = backend_bridge._plugin_to_group_map.get(dest_plugin_id)
-            
+
             if source_group is None:
                 return f"❌ Plugin {source_plugin_id} not found in patchbay (try refresh_patchbay)"
             if dest_group is None:
                 return f"❌ Plugin {dest_plugin_id} not found in patchbay (try refresh_patchbay)"
-            
-            # Determine port connections based on channel configuration
-            connections = []
-            
-            if source_channel == "stereo" and dest_channel == "stereo":
-                # Stereo to stereo: connect L->L and R->R
-                connections.append((
-                    source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,  # Left out
-                    dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0      # Left in
-                ))
-                connections.append((
-                    source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,  # Right out
-                    dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1      # Right in
-                ))
-            elif source_channel == "mono":
-                # Mono source: duplicate to both channels if dest is stereo
-                if dest_channel == "stereo":
+
+            # Auto-detect channel configuration from actual port counts
+            if source_channel == "auto" and dest_channel == "auto":
+                _, src_outs = backend_bridge.get_audio_port_counts(source_plugin_id)
+                dst_ins, _ = backend_bridge.get_audio_port_counts(dest_plugin_id)
+
+                src_is_mono = (src_outs <= 1)
+                dst_is_mono = (dst_ins <= 1)
+
+                connections = []
+                if src_is_mono and dst_is_mono:
+                    # mono->mono: 1 connection
+                    label = "mono to mono"
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                    ))
+                elif src_is_mono and not dst_is_mono:
+                    # mono->stereo: duplicate output to both inputs
+                    label = "mono to stereo"
                     connections.append((
                         source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
                         dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
                     ))
                     connections.append((
-                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,  # Same source
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
                         dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
                     ))
-                else:
-                    # Mono to mono
+                elif not src_is_mono and dst_is_mono:
+                    # stereo->mono: sum both outputs to mono input
+                    label = "stereo to mono"
                     connections.append((
                         source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
                         dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
                     ))
-            
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                    ))
+                else:
+                    # stereo->stereo: L->L, R->R
+                    label = "stereo to stereo"
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                    ))
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
+                    ))
+            else:
+                # User explicitly set channels - use existing logic
+                label = f"{source_channel} to {dest_channel}"
+                connections = []
+
+                if source_channel == "stereo" and dest_channel == "stereo":
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                    ))
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
+                    ))
+                elif source_channel == "mono":
+                    if dest_channel in ("stereo", "auto"):
+                        connections.append((
+                            source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                            dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                        ))
+                        connections.append((
+                            source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                            dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
+                        ))
+                    else:
+                        connections.append((
+                            source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                            dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                        ))
+
             # Execute connections
             success_count = 0
             for src_group, src_port, dst_group, dst_port in connections:
                 if backend_bridge.patchbay_connect(src_group, src_port, dst_group, dst_port):
                     success_count += 1
-            
+
             if success_count == len(connections):
                 plugin_names = [
                     backend_bridge.get_plugin_info(source_plugin_id).get('name', f'Plugin {source_plugin_id}'),
                     backend_bridge.get_plugin_info(dest_plugin_id).get('name', f'Plugin {dest_plugin_id}')
                 ]
-                return f"✅ Connected {plugin_names[0]} → {plugin_names[1]} ({source_channel} to {dest_channel})"
+                return f"✅ Connected {plugin_names[0]} → {plugin_names[1]} ({label})"
             else:
                 return f"⚠️ Partially connected: {success_count}/{len(connections)} connections made"
-                
+
         except Exception as e:
             return f"❌ Error connecting plugins: {e}"
 
     @mcp.tool()
-    def connect_system_to_plugin(system_input: int, plugin_id: int, channel: str = "mono") -> str:
+    def connect_system_to_plugin(system_input: int, plugin_id: int, channel: str = "auto") -> str:
         """
         Connect system audio input to a plugin
-        
+
         Args:
             system_input: System input number (1-16)
             plugin_id: Destination plugin ID
-            channel: "mono", "left", "right", or "stereo"
-            
+            channel: "auto" (default), "mono", "left", "right", or "stereo"
+
         Returns:
             Status message
         """
         if not backend_bridge:
             return "❌ Backend API not available."
-            
+
         try:
             # Get plugin's backend group ID
             plugin_group = backend_bridge._plugin_to_group_map.get(plugin_id)
             if plugin_group is None:
                 return f"❌ Plugin {plugin_id} not found in patchbay"
-            
+
             # System audio input is group 1 in Carla's patchbay
             system_group = 1
             system_port = PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + (system_input - 1)
-            
+
+            # Resolve auto channel from actual port counts
+            effective_channel = channel
+            if channel == "auto":
+                dst_ins, _ = backend_bridge.get_audio_port_counts(plugin_id)
+                effective_channel = "mono" if dst_ins <= 1 else "stereo"
+
             connections = []
-            if channel == "stereo":
-                # Connect to both inputs
+            if effective_channel == "stereo":
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1))
-            elif channel == "left":
-                # Connect to left input only
+            elif effective_channel == "left":
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
-            elif channel == "right":
-                # Connect to right input only
+            elif effective_channel == "right":
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1))
             else:
-                # Mono connection (same as left)
+                # mono
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
-            
+
             # Execute connections
             success_count = 0
             for src_group, src_port, dst_group, dst_port in connections:
                 if backend_bridge.patchbay_connect(src_group, src_port, dst_group, dst_port):
                     success_count += 1
-            
+
             if success_count == len(connections):
                 plugin_name = backend_bridge.get_plugin_info(plugin_id).get('name', f'Plugin {plugin_id}')
-                return f"✅ Connected System Input {system_input} → {plugin_name} ({channel})"
+                return f"✅ Connected System Input {system_input} → {plugin_name} ({effective_channel})"
             else:
                 return f"⚠️ Partially connected: {success_count}/{len(connections)} connections made"
-                
+
         except Exception as e:
             return f"❌ Error connecting system to plugin: {e}"
 
-    @mcp.tool()  
-    def connect_plugin_to_system(plugin_id: int, system_output_left: int, 
+    @mcp.tool()
+    def connect_plugin_to_system(plugin_id: int, system_output_left: int,
                                 system_output_right: int = None) -> str:
         """
         Connect plugin output to system audio outputs
-        
+
+        Auto-detects mono/stereo from actual plugin port counts.
+        Mono plugins duplicate their single output to both system outputs.
+        Stereo plugins connect L->L, R->R.
+
         Args:
             plugin_id: Source plugin ID
             system_output_left: System output for left channel (1-16)
             system_output_right: System output for right channel (defaults to left+1)
-            
+
         Returns:
             Status message
         """
         if not backend_bridge:
             return "❌ Backend API not available."
-        
+
         if system_output_right is None:
             system_output_right = system_output_left + 1
-            
+
         try:
             # Get plugin's backend group ID
             plugin_group = backend_bridge._plugin_to_group_map.get(plugin_id)
             if plugin_group is None:
                 return f"❌ Plugin {plugin_id} not found in patchbay"
-            
+
             # System audio output is group 2 in Carla's patchbay
             system_group = 2
-            
-            # Connect L and R channels
-            connections = [
-                (plugin_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
-                 system_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + (system_output_left - 1)),
-                (plugin_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
-                 system_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + (system_output_right - 1))
-            ]
-            
+
+            # Auto-detect mono/stereo from actual port counts
+            _, src_outs = backend_bridge.get_audio_port_counts(plugin_id)
+            is_mono = (src_outs <= 1)
+
+            connections = []
+            if is_mono:
+                # Mono: duplicate output 0 to both system outputs
+                connections.append((
+                    plugin_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                    system_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + (system_output_left - 1)
+                ))
+                connections.append((
+                    plugin_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                    system_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + (system_output_right - 1)
+                ))
+            else:
+                # Stereo: L->L, R->R
+                connections.append((
+                    plugin_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                    system_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + (system_output_left - 1)
+                ))
+                connections.append((
+                    plugin_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                    system_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + (system_output_right - 1)
+                ))
+
             # Execute connections
             success_count = 0
             for src_group, src_port, dst_group, dst_port in connections:
                 if backend_bridge.patchbay_connect(src_group, src_port, dst_group, dst_port):
                     success_count += 1
-            
+
             if success_count == len(connections):
                 plugin_name = backend_bridge.get_plugin_info(plugin_id).get('name', f'Plugin {plugin_id}')
                 return f"✅ Connected {plugin_name} → System Output {system_output_left}/{system_output_right}"
             else:
                 return f"⚠️ Partially connected: {success_count}/{len(connections)} connections made"
-                
+
         except Exception as e:
             return f"❌ Error connecting plugin to system: {e}"
 
