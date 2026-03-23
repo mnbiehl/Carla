@@ -625,6 +625,27 @@ def register_plugin_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
             return f"❌ Error adding JACK application: {e}"
     
     @mcp.tool()
+    def save_plugin_snapshot(plugin_id: int, name: str) -> str:
+        """Save all parameter values for a plugin as a named snapshot.
+        Args:
+            plugin_id: Plugin ID (0-based)
+            name: Snapshot name (used as filename)
+        """
+        path = backend_bridge.save_parameter_snapshot(plugin_id, name)
+        return f"Snapshot '{name}' saved to {path}"
+
+    @mcp.tool()
+    def load_plugin_snapshot(plugin_id: int, name: str) -> str:
+        """Load parameter values from a named snapshot.
+        Args:
+            plugin_id: Plugin ID (0-based)
+            name: Snapshot name to load
+        """
+        if backend_bridge.load_parameter_snapshot(plugin_id, name):
+            return f"Snapshot '{name}' loaded for plugin {plugin_id}"
+        return f"Snapshot '{name}' not found"
+
+    @mcp.tool()
     def add_plugin_by_name(plugin_name: str, plugin_type: Optional[str] = None) -> str:
         """
         Add a plugin to Carla by searching for it by name

@@ -508,7 +508,45 @@ class CarlaBackendBridge:
         except Exception as e:
             self.logger.error(f"Error getting parameter count for plugin {plugin_id}: {e}")
             return 0
-    
+
+    def save_parameter_snapshot(self, plugin_id: int, name: str, snapshot_dir=None):
+        """Save all parameter values for a plugin as a JSON snapshot.
+        Returns: Path to the saved snapshot file.
+        """
+        import json
+        from pathlib import Path
+        if snapshot_dir is None:
+            snapshot_dir = Path.home() / ".config" / "carla-mcp" / "snapshots"
+        snapshot_dir = Path(snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        params = {}
+        count = self.get_parameter_count(plugin_id)
+        for i in range(count):
+            value = self.host.get_current_parameter_value(plugin_id, i)
+            params[str(i)] = value
+
+        path = snapshot_dir / f"{name}.json"
+        path.write_text(json.dumps(params))
+        return path
+
+    def load_parameter_snapshot(self, plugin_id: int, name: str, snapshot_dir=None):
+        """Load parameter values from a JSON snapshot. Returns True on success, False if not found."""
+        import json
+        from pathlib import Path
+        if snapshot_dir is None:
+            snapshot_dir = Path.home() / ".config" / "carla-mcp" / "snapshots"
+        snapshot_dir = Path(snapshot_dir)
+
+        path = snapshot_dir / f"{name}.json"
+        if not path.exists():
+            return False
+
+        params = json.loads(path.read_text())
+        for param_id_str, value in params.items():
+            self.host.set_parameter_value(plugin_id, int(param_id_str), float(value))
+        return True
+
     def get_parameter_info(self, plugin_id: int, parameter_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed information about a specific parameter"""
         try:
