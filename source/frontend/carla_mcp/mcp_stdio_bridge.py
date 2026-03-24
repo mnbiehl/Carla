@@ -76,7 +76,7 @@ _carla_process: subprocess.Popen | None = None
 _carla_log_file = None
 
 # Looper engine (Rust binary) configuration
-LOOPERS_PATH = os.getenv("LOOPERS_PATH", str(Path(__file__).resolve().parent.parent.parent.parent / "looperdooper" / "target" / "release" / "loopers"))
+LOOPERS_PATH = os.getenv("LOOPERS_PATH", str(Path(__file__).resolve().parent.parent.parent.parent.parent / "looperdooper" / "target" / "release" / "loopers"))
 
 # Track the Looper MCP process we launched
 _looper_process: subprocess.Popen | None = None
@@ -122,7 +122,7 @@ async def _start_carla() -> str:
     # Launch carla-control (connects to our already-running engine as a viewer)
     _carla_log_file = open("/tmp/carla-mcp.log", "w")
     _carla_process = subprocess.Popen(
-        ["pw-jack", "carla-control"],
+        ["pw-jack", "/usr/bin/python3", "/usr/share/carla/carla-control"],
         env=env,
         stdout=_carla_log_file,
         stderr=_carla_log_file,
