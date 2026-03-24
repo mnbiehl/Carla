@@ -120,10 +120,14 @@ async def _start_carla() -> str:
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
 
     # Launch carla-control (connects to our already-running engine as a viewer)
+    # Use our source tree's carla-control + libs, not the system-installed one
+    carla_control_script = str(CARLA_FRONTEND_DIR / "carla-control")
+    env["LD_LIBRARY_PATH"] = str(CARLA_FRONTEND_DIR.parent.parent / "bin")
     _carla_log_file = open("/tmp/carla-mcp.log", "w")
     _carla_process = subprocess.Popen(
-        ["pw-jack", "/usr/bin/python3", "/usr/share/carla/carla-control"],
+        ["pw-jack", "/usr/bin/python3", carla_control_script],
         env=env,
+        cwd=str(CARLA_FRONTEND_DIR),
         stdout=_carla_log_file,
         stderr=_carla_log_file,
     )
