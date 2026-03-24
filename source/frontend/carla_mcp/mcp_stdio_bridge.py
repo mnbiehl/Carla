@@ -119,13 +119,12 @@ async def _start_carla() -> str:
     env = os.environ.copy()
     env["CARLA_MCP_PORT"] = str(CARLA_PORT)
 
-    # Launch carla-control (connects to our already-running engine as a viewer)
-    # Use our source tree's carla-control + libs, not the system-installed one
-    carla_control_script = str(CARLA_FRONTEND_DIR / "carla-control")
-    env["LD_LIBRARY_PATH"] = str(CARLA_FRONTEND_DIR.parent.parent / "bin")
+    # Launch carla.py (the Carla GUI + engine + MCP SSE server)
+    # The bridge proxies tool calls to this SSE server — it needs the engine running
+    carla_script = str(CARLA_FRONTEND_DIR / "carla.py")
     _carla_log_file = open("/tmp/carla-mcp.log", "w")
     _carla_process = subprocess.Popen(
-        ["pw-jack", "/usr/bin/python3", carla_control_script],
+        ["pw-jack", "/usr/bin/python3", carla_script],
         env=env,
         cwd=str(CARLA_FRONTEND_DIR),
         stdout=_carla_log_file,
