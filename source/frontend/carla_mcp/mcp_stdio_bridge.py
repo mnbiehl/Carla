@@ -531,17 +531,27 @@ async def _start_rig() -> str:
     looper_msg = await _start_looper()
     messages.append(f"[Looper] {looper_msg}")
 
-    # Step 3: Create external pw-link connections
-    from carla_mcp.utils.pw_link import pw_link_connect, pw_link_verify
+    # Step 3: Create external pw-link connections using auto-discovery
+    from carla_mcp.utils.pw_link import (
+        pw_link_connect, pw_link_verify,
+        find_monitor_output_ports, find_capture_input_ports,
+    )
 
-    external_connections = [
-        # Scarlett -> Carla (live monitor)
-        ("alsa_input.usb-Focusrite_Scarlett_2i2_USB-00.pro-input-0:capture_AUX0", "Carla:audio-in1"),
-        ("alsa_input.usb-Focusrite_Scarlett_2i2_USB-00.pro-input-0:capture_AUX1", "Carla:audio-in2"),
-        # Carla -> Scarlett (monitoring output)
-        ("Carla:audio-out1", "alsa_output.usb-Focusrite_Scarlett_2i2_USB-00.pro-output-0:playback_AUX0"),
-        ("Carla:audio-out2", "alsa_output.usb-Focusrite_Scarlett_2i2_USB-00.pro-output-0:playback_AUX1"),
-    ]
+    captures = find_capture_input_ports()
+    monitors = find_monitor_output_ports()
+
+    external_connections = []
+    # Captures -> Carla (live monitor)
+    for i, cap in enumerate(captures[:2]):
+        external_connections.append((cap, f"Carla:audio-in{i + 1}"))
+    # Carla -> Monitors
+    for i, mon in enumerate(monitors[:2]):
+        external_connections.append((f"Carla:audio-out{i + 1}", mon))
+
+    if not captures:
+        messages.append("[Connections] WARNING: No capture input ports discovered")
+    if not monitors:
+        messages.append("[Connections] WARNING: No monitor output ports discovered")
 
     conn_results = []
     for src, dst in external_connections:
