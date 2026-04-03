@@ -12,6 +12,9 @@ from carla_mcp.utils.pw_link import (
     pw_link_list_outputs,
     pw_link_list_inputs,
     pw_link_verify,
+    find_monitor_output_ports,
+    find_capture_input_ports,
+    ensure_carla_to_monitors,
 )
 
 
@@ -125,3 +128,85 @@ def test_connect_handles_missing_pw_link(mock_run):
     result = pw_link_connect("Carla:audio-out1", "Scarlett:playback_FL")
     assert result.success is False
     assert "not found" in result.message.lower() or "pw-link" in result.message.lower()
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_list_inputs")
+def test_find_monitor_output_ports_matches_alsa_pro_output(mock_list_inputs):
+    """Only alsa_output.*pro-output.*playback_AUX ports should be returned."""
+    mock_list_inputs.return_value = [
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX0",
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX1",
+        "Carla:audio-in1",
+        "Firefox:output_FL",
+        "alsa_output.pci-something:playback_FL",
+    ]
+    result = find_monitor_output_ports()
+    assert result == [
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX0",
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX1",
+    ]
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_list_inputs")
+def test_find_monitor_output_ports_returns_empty_on_no_match(mock_list_inputs):
+    """No pro-output ports should yield an empty list."""
+    mock_list_inputs.return_value = [
+        "Carla:audio-in1",
+        "Firefox:output_FL",
+        "alsa_output.pci-something:playback_FL",
+    ]
+    result = find_monitor_output_ports()
+    assert result == []
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_list_outputs")
+def test_find_capture_input_ports_matches_alsa_pro_input(mock_list_outputs):
+    """Only alsa_input.*pro-input.*capture_AUX ports should be returned."""
+    mock_list_outputs.return_value = [
+        "alsa_input.usb-Focusrite_Scarlett_18i20_USB-00.pro-input-0:capture_AUX0",
+        "alsa_input.usb-Focusrite_Scarlett_18i20_USB-00.pro-input-0:capture_AUX1",
+        "Carla:audio-out1",
+        "Firefox:input_FL",
+    ]
+    result = find_capture_input_ports()
+    assert result == [
+        "alsa_input.usb-Focusrite_Scarlett_18i20_USB-00.pro-input-0:capture_AUX0",
+        "alsa_input.usb-Focusrite_Scarlett_18i20_USB-00.pro-input-0:capture_AUX1",
+    ]
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_connect")
+@patch("carla_mcp.utils.pw_link.pw_link_verify")
+@patch("carla_mcp.utils.pw_link.find_monitor_output_ports")
+def test_ensure_carla_to_monitors_creates_missing_connections(
+    mock_find, mock_verify, mock_connect
+):
+    """out1 already connected, out2 needs connecting."""
+    mock_find.return_value = [
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX0",
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX1",
+    ]
+    # out1 already connected, out2 not
+    mock_verify.side_effect = [True, False]
+    mock_connect.return_value = PwLinkResult(success=True)
+
+    result = ensure_carla_to_monitors("Carla")
+    assert result["connected"] == 1
+    assert result["already_connected"] == 1
+    assert result["failed"] == 0
+    assert len(result["monitor_ports"]) == 2
+    mock_connect.assert_called_once_with(
+        "Carla:audio-out2",
+        "alsa_output.usb-Focusrite_Scarlett_18i20_USB-00.pro-output-0:playback_AUX1",
+    )
+
+
+@patch("carla_mcp.utils.pw_link.find_monitor_output_ports")
+def test_ensure_carla_to_monitors_no_monitors_found(mock_find):
+    """Empty find returns all zeros."""
+    mock_find.return_value = []
+    result = ensure_carla_to_monitors("Carla")
+    assert result["connected"] == 0
+    assert result["already_connected"] == 0
+    assert result["failed"] == 0
+    assert result["monitor_ports"] == []

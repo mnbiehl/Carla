@@ -1,6 +1,7 @@
 """Wrapper around pw-link for PipeWire audio connections."""
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -131,3 +132,52 @@ def pw_link_verify(source: str, destination: str) -> bool:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         logger.error("Failed to verify PipeWire connection")
         return False
+
+
+_MONITOR_OUTPUT_RE = re.compile(r"^alsa_output\..*pro-output.*:playback_AUX\d+$")
+_CAPTURE_INPUT_RE = re.compile(r"^alsa_input\..*pro-input.*:capture_AUX\d+$")
+
+
+def find_monitor_output_ports() -> list[str]:
+    """Find ALSA pro-output playback ports (monitor outputs) via pw-link."""
+    ports = pw_link_list_inputs()
+    return sorted(p for p in ports if _MONITOR_OUTPUT_RE.match(p))
+
+
+def find_capture_input_ports() -> list[str]:
+    """Find ALSA pro-input capture ports (hardware inputs) via pw-link."""
+    ports = pw_link_list_outputs()
+    return sorted(p for p in ports if _CAPTURE_INPUT_RE.match(p))
+
+
+def ensure_carla_to_monitors(carla_client: str = "Carla") -> dict:
+    """Connect Carla audio outputs to monitor playback ports.
+
+    Returns dict with keys: connected, already_connected, failed, monitor_ports.
+    """
+    monitor_ports = find_monitor_output_ports()
+    connected = 0
+    already_connected = 0
+    failed = 0
+
+    for i, monitor_port in enumerate(monitor_ports):
+        source = f"{carla_client}:audio-out{i + 1}"
+        if pw_link_verify(source, monitor_port):
+            already_connected += 1
+        else:
+            result = pw_link_connect(source, monitor_port)
+            if result.success:
+                connected += 1
+            else:
+                failed += 1
+                logger.warning(
+                    "Failed to connect %s -> %s: %s",
+                    source, monitor_port, result.message,
+                )
+
+    return {
+        "connected": connected,
+        "already_connected": already_connected,
+        "failed": failed,
+        "monitor_ports": monitor_ports,
+    }
