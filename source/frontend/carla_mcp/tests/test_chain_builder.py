@@ -171,6 +171,32 @@ class TestConnectSystemInput:
         )
 
 
+class TestAutoWireMonitors:
+    """build_chain with connect_system_output=True should call ensure_carla_to_monitors."""
+
+    @patch("carla_mcp.tools.chain_builder.ensure_carla_to_monitors")
+    def test_calls_ensure_carla_to_monitors_when_system_output(self, mock_ensure):
+        mock_ensure.return_value = {
+            "connected": 1, "already_connected": 1, "failed": 0,
+            "monitor_ports": ["mon:AUX0", "mon:AUX1"],
+        }
+        bridge = _make_bridge()
+        result = build_chain(bridge, ["EQ"], connect_system_output=True)
+
+        assert result["success"] is True
+        mock_ensure.assert_called_once()
+        assert "external_monitors" in result
+
+    @patch("carla_mcp.tools.chain_builder.ensure_carla_to_monitors")
+    def test_skips_monitor_wire_when_no_system_output(self, mock_ensure):
+        bridge = _make_bridge()
+        result = build_chain(bridge, ["EQ"], connect_system_output=False)
+
+        assert result["success"] is True
+        mock_ensure.assert_not_called()
+        assert "external_monitors" not in result
+
+
 class TestConnectSystemOutput:
     """test_connect_last_plugin_to_system_output — last plugin connected to system group 2."""
 

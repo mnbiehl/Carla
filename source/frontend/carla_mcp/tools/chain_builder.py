@@ -13,6 +13,7 @@ from ..constants import (
     PATCHBAY_PORT_AUDIO_INPUT_OFFSET,
     PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET,
 )
+from ..utils.pw_link import ensure_carla_to_monitors
 
 
 def _make_connections(
@@ -201,7 +202,7 @@ def build_chain(
             bridge.patchbay_connect(ga, pa, gb, pb)
             all_connections.append((ga, pa, gb, pb))
 
-    return {
+    result = {
         "success": True,
         "plugins": [
             {"id": pid, "name": name}
@@ -213,6 +214,12 @@ def build_chain(
         ],
         "error": None,
     }
+
+    # Phase 4: Auto-wire external monitors if system output connected
+    if connect_system_output and added_plugin_ids:
+        result["external_monitors"] = ensure_carla_to_monitors()
+
+    return result
 
 
 def register_chain_builder_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
