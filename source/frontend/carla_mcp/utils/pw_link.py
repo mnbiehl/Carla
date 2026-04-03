@@ -3,6 +3,7 @@
 import logging
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -181,3 +182,27 @@ def ensure_carla_to_monitors(carla_client: str = "Carla") -> dict:
         "failed": failed,
         "monitor_ports": monitor_ports,
     }
+
+
+def wait_for_ports(
+    expected_ports: list[str], timeout: float = 10.0, interval: float = 1.0
+) -> bool:
+    """Poll pw-link until all expected ports appear or timeout.
+
+    Args:
+        expected_ports: Port names to wait for.
+        timeout: Max seconds to wait.
+        interval: Seconds between polls.
+
+    Returns True if all ports found, False on timeout.
+    """
+    deadline = time.monotonic() + timeout
+    expected = set(expected_ports)
+    while time.monotonic() < deadline:
+        outputs = set(pw_link_list_outputs())
+        inputs = set(pw_link_list_inputs())
+        all_ports = outputs | inputs
+        if expected.issubset(all_ports):
+            return True
+        time.sleep(interval)
+    return False

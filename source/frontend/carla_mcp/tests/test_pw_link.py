@@ -210,3 +210,25 @@ def test_ensure_carla_to_monitors_no_monitors_found(mock_find):
     assert result["already_connected"] == 0
     assert result["failed"] == 0
     assert result["monitor_ports"] == []
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_list_inputs", return_value=[])
+@patch("carla_mcp.utils.pw_link.pw_link_list_outputs")
+def test_wait_for_ports_finds_ports(mock_outputs, mock_inputs):
+    """Should return True once expected ports appear."""
+    mock_outputs.side_effect = [
+        ["Carla:audio-out1"],
+        ["Carla:audio-out1", "loopers:loop0_out_l", "loopers:loop0_out_r"],
+    ]
+    from carla_mcp.utils.pw_link import wait_for_ports
+    found = wait_for_ports(["loopers:loop0_out_l"], timeout=2, interval=0.01)
+    assert found is True
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_list_inputs", return_value=[])
+@patch("carla_mcp.utils.pw_link.pw_link_list_outputs", return_value=["Carla:audio-out1"])
+def test_wait_for_ports_timeout(mock_outputs, mock_inputs):
+    """Should return False if ports never appear."""
+    from carla_mcp.utils.pw_link import wait_for_ports
+    found = wait_for_ports(["loopers:loop0_out_l"], timeout=0.05, interval=0.01)
+    assert found is False
