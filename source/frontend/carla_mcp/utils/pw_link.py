@@ -160,7 +160,7 @@ def ensure_carla_to_monitors(carla_client: str = "Carla") -> dict:
     already_connected = 0
     failed = 0
 
-    for i, monitor_port in enumerate(monitor_ports):
+    for i, monitor_port in enumerate(monitor_ports[:2]):
         source = f"{carla_client}:audio-out{i + 1}"
         if pw_link_verify(source, monitor_port):
             already_connected += 1
