@@ -508,6 +508,33 @@ async def load_rig_session(name: str) -> str:
         except Exception as e:
             messages.append(f"Failed to load looper session: {e}")
 
+    # Restore saved routing (v2 manifests)
+    routing = manifest.get("routing", [])
+    if routing:
+        from carla_mcp.utils.pw_link import pw_link_connect, wait_for_ports
+
+        # Wait for looper ports if any routing targets them
+        looper_ports = [r["src"] for r in routing if r["src"].startswith("loopers:")]
+        if looper_ports:
+            if not wait_for_ports(looper_ports, timeout=10.0, interval=1.0):
+                messages.append(
+                    "WARNING: Timed out waiting for looper ports. "
+                    "Some routing may fail."
+                )
+
+        connected = 0
+        failed = 0
+        for route in routing:
+            result = pw_link_connect(route["src"], route["dst"])
+            if result.success:
+                connected += 1
+            else:
+                failed += 1
+        messages.append(
+            f"[Routing] Restored {connected}/{len(routing)} connections"
+            + (f" ({failed} failed)" if failed else "")
+        )
+
     return "\n".join(messages) if messages else "Nothing to load."
 
 
