@@ -109,3 +109,57 @@ def list_chain_presets_impl() -> List[Dict[str, Any]]:
             logger.warning("Skipping invalid preset file %s: %s", path, e)
 
     return presets
+
+
+def register_chain_preset_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
+    """Register chain preset MCP tools."""
+
+    @mcp.tool()
+    def save_chain_preset(name: str, plugin_ids: List[int]) -> str:
+        """Save a named chain preset with all plugin parameters.
+
+        Captures plugin names and all parameter values for the specified
+        plugin IDs. Saved to ~/.config/rig-sessions/chain-presets/{name}.json.
+
+        Args:
+            name: Preset name (e.g. "uke-chain", "guitar-lead").
+            plugin_ids: List of plugin IDs to include (e.g. [0, 1, 2]).
+        """
+        result = save_chain_preset_impl(bridge, name, plugin_ids)
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def load_chain_preset(
+        name: str,
+        connect_system_input: bool = True,
+        connect_system_output: bool = True,
+    ) -> str:
+        """Load a chain preset: adds plugins, wires them, restores parameters.
+
+        Builds the full effects chain from the saved preset, auto-detects
+        mono/stereo routing, and applies all saved parameter values.
+        If connect_system_output is True, also verifies/creates the
+        external Carla-to-monitors connection.
+
+        Args:
+            name: Preset name to load.
+            connect_system_input: Wire system audio input to first plugin.
+            connect_system_output: Wire last plugin to system output + monitors.
+        """
+        result = load_chain_preset_impl(
+            bridge, name,
+            connect_system_input=connect_system_input,
+            connect_system_output=connect_system_output,
+        )
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def list_chain_presets() -> str:
+        """List available chain presets.
+
+        Shows all saved chain presets with their plugin lists.
+        """
+        presets = list_chain_presets_impl()
+        if not presets:
+            return json.dumps({"presets": [], "message": "No chain presets saved yet."})
+        return json.dumps({"presets": presets}, indent=2)

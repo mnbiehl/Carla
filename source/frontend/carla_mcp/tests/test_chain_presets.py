@@ -4,10 +4,13 @@ import json
 import pytest
 from unittest.mock import Mock, patch
 
+from fastmcp import FastMCP
+
 from carla_mcp.tools.chain_presets import (
     save_chain_preset_impl,
     load_chain_preset_impl,
     list_chain_presets_impl,
+    register_chain_preset_tools,
     CHAIN_PRESET_DIR,
 )
 
@@ -176,3 +179,14 @@ class TestListChainPresets:
         with patch("carla_mcp.tools.chain_presets.CHAIN_PRESET_DIR", tmp_path):
             result = list_chain_presets_impl()
         assert result == []
+
+
+class TestToolRegistration:
+    def test_registers_three_tools(self):
+        mcp = FastMCP("test")
+        bridge = Mock()
+        register_chain_preset_tools(mcp, bridge)
+        tool_names = list(mcp._tool_manager._tools.keys())
+        assert "save_chain_preset" in tool_names
+        assert "load_chain_preset" in tool_names
+        assert "list_chain_presets" in tool_names
