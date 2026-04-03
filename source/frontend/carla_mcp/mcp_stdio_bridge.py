@@ -59,14 +59,18 @@ def _build_rig_manifest(
     looper_running: bool,
     carla_session: str = "",
     looper_session: str = "",
+    routing: list | None = None,
 ) -> dict:
-    return {
-        "version": 1,
+    manifest = {
+        "version": 2 if routing is not None else 1,
         "backends": {
             "carla": {"running": carla_running, "session": carla_session},
             "looper": {"running": looper_running, "session": looper_session},
         },
     }
+    if routing is not None:
+        manifest["routing"] = routing
+    return manifest
 
 
 bridge = FastMCP("Carla MCP Bridge")
@@ -441,12 +445,19 @@ async def save_rig_session(name: str) -> str:
         except Exception as e:
             messages.append(f"Failed to save looper session: {e}")
 
+    # Snapshot current pw-link connections
+    from carla_mcp.orchestration.jack_router import JackRouter
+    router = JackRouter()
+    connections = router.list_connections(filter_prefixes=["loopers:", "Carla:"])
+    routing = [{"src": src, "dst": dst} for src, dst in connections]
+
     # Save rig manifest
     manifest = _build_rig_manifest(
         carla_running=_is_carla_reachable(),
         looper_running=_is_looper_reachable(),
         carla_session=carla_session,
         looper_session=looper_session,
+        routing=routing,
     )
     manifest_path = session_dir / "rig_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
