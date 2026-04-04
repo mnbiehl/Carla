@@ -25,30 +25,3 @@ def test_rig_manifest_defaults():
     assert manifest["version"] == 1
     assert manifest["backends"]["carla"]["running"] is False
     assert manifest["backends"]["carla"]["session"] == ""
-
-
-def test_rig_manifest_v2_includes_routing():
-    manifest = _build_rig_manifest(
-        carla_running=True, looper_running=True,
-        routing=[
-            {"src": "loopers:loop0_out_l", "dst": "Carla:audio-in3"},
-            {"src": "Carla:audio-out1", "dst": "alsa_output.test:playback_AUX0"},
-        ],
-    )
-    assert manifest["version"] == 2
-    assert len(manifest["routing"]) == 2
-    assert manifest["routing"][0]["src"] == "loopers:loop0_out_l"
-
-
-def test_rig_manifest_v2_empty_routing():
-    manifest = _build_rig_manifest(
-        carla_running=True, looper_running=True, routing=[],
-    )
-    assert manifest["version"] == 2
-    assert manifest["routing"] == []
-
-
-def test_rig_manifest_v1_compat_no_routing():
-    manifest = _build_rig_manifest(carla_running=True, looper_running=True)
-    assert manifest["version"] == 1
-    assert "routing" not in manifest

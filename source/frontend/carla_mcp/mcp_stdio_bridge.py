@@ -59,18 +59,14 @@ def _build_rig_manifest(
     looper_running: bool,
     carla_session: str = "",
     looper_session: str = "",
-    routing: list | None = None,
 ) -> dict:
-    manifest = {
-        "version": 2 if routing is not None else 1,
+    return {
+        "version": 1,
         "backends": {
             "carla": {"running": carla_running, "session": carla_session},
             "looper": {"running": looper_running, "session": looper_session},
         },
     }
-    if routing is not None:
-        manifest["routing"] = routing
-    return manifest
 
 
 bridge = FastMCP("Carla MCP Bridge")
@@ -445,19 +441,12 @@ async def save_rig_session(name: str) -> str:
         except Exception as e:
             messages.append(f"Failed to save looper session: {e}")
 
-    # Snapshot current pw-link connections
-    from carla_mcp.orchestration.jack_router import JackRouter
-    router = JackRouter()
-    connections = router.list_connections(filter_prefixes=["loopers:", "Carla:"])
-    routing = [{"src": src, "dst": dst} for src, dst in connections]
-
     # Save rig manifest
     manifest = _build_rig_manifest(
         carla_running=_is_carla_reachable(),
         looper_running=_is_looper_reachable(),
         carla_session=carla_session,
         looper_session=looper_session,
-        routing=routing,
     )
     manifest_path = session_dir / "rig_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -508,32 +497,23 @@ async def load_rig_session(name: str) -> str:
         except Exception as e:
             messages.append(f"Failed to load looper session: {e}")
 
-    # Restore saved routing (v2 manifests)
-    routing = manifest.get("routing", [])
-    if routing:
-        from carla_mcp.utils.pw_link import pw_link_connect, wait_for_ports
+    # Restore external Carla wiring (loopers handles its own JACK connections)
+    from carla_mcp.utils.pw_link import (
+        ensure_carla_to_monitors, find_capture_input_ports, pw_link_connect,
+    )
 
-        # Wait for looper ports if any routing targets them
-        looper_ports = [r["src"] for r in routing if r["src"].startswith("loopers:")]
-        if looper_ports:
-            if not wait_for_ports(looper_ports, timeout=10.0, interval=1.0):
-                messages.append(
-                    "WARNING: Timed out waiting for looper ports. "
-                    "Some routing may fail."
-                )
+    monitors_result = ensure_carla_to_monitors()
+    captures = find_capture_input_ports()
+    capture_connected = 0
+    for i, cap in enumerate(captures[:2]):
+        r = pw_link_connect(cap, f"Carla:audio-in{i + 1}")
+        if r.success:
+            capture_connected += 1
 
-        connected = 0
-        failed = 0
-        for route in routing:
-            result = pw_link_connect(route["src"], route["dst"])
-            if result.success:
-                connected += 1
-            else:
-                failed += 1
-        messages.append(
-            f"[Routing] Restored {connected}/{len(routing)} connections"
-            + (f" ({failed} failed)" if failed else "")
-        )
+    mon_total = monitors_result["connected"] + monitors_result["already_connected"]
+    messages.append(
+        f"[Routing] Monitors: {mon_total}/2, Captures: {capture_connected}/{len(captures[:2])}"
+    )
 
     return "\n".join(messages) if messages else "Nothing to load."
 
