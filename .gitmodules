@@ -2,7 +2,7 @@
 	path = source/native-plugins/external
 	url = https://github.com/falkTX/Carla-Plugins
 [submodule "harness"]
-	path = harness
+	path = kb
 	url = git@github.com:mnbiehl/roboloops-harness.git
 	branch = main
 	ignore = all
