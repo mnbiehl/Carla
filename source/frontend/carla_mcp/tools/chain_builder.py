@@ -222,8 +222,83 @@ def build_chain(
     return result
 
 
+def rewire_chain_connections(bridge: CarlaBackendBridge, plugin_ids: List[int]) -> dict:
+    """Disconnect all existing internal connections and rewire to the given plugin order.
+
+    Removes every currently-tracked (non-pending) internal connection, then
+    re-wires system-in → plugin_ids[0] → … → plugin_ids[-1] → system-out.
+
+    Args:
+        bridge:     The Carla backend bridge for the child instance.
+        plugin_ids: Ordered list of plugin IDs for the new chain.
+
+    Returns:
+        ``{"success": True, "plugin_order": plugin_ids, "connections": <count>}``
+        on success, or ``{"success": False, "error": <message>}`` on exception.
+    """
+    try:
+        # Step 1: disconnect all currently-tracked internal connections
+        for conn in bridge.get_patchbay_connections():
+            bridge.patchbay_disconnect(conn["id"])
+
+        # Step 2: if no plugins, nothing to wire
+        if not plugin_ids:
+            return {"success": True, "plugin_order": plugin_ids, "connections": 0}
+
+        connection_count = 0
+
+        # Step 3: wire system input (group 1) → first plugin
+        first_id = plugin_ids[0]
+        first_group = bridge._plugin_to_group_map[first_id]
+        for ga, pa, gb, pb in _make_system_to_plugin_connections(bridge, first_id, first_group, 1):
+            bridge.patchbay_connect(ga, pa, gb, pb)
+            connection_count += 1
+
+        # Step 4: wire adjacent pairs
+        for i in range(len(plugin_ids) - 1):
+            pid_i = plugin_ids[i]
+            pid_next = plugin_ids[i + 1]
+            group_i = bridge._plugin_to_group_map[pid_i]
+            group_next = bridge._plugin_to_group_map[pid_next]
+            for ga, pa, gb, pb in _make_connections(bridge, pid_i, group_i, pid_next, group_next):
+                bridge.patchbay_connect(ga, pa, gb, pb)
+                connection_count += 1
+
+        # Step 5: wire last plugin → system output (group 2)
+        last_id = plugin_ids[-1]
+        last_group = bridge._plugin_to_group_map[last_id]
+        for ga, pa, gb, pb in _make_plugin_to_system_connections(bridge, last_id, last_group, 2):
+            bridge.patchbay_connect(ga, pa, gb, pb)
+            connection_count += 1
+
+        return {"success": True, "plugin_order": plugin_ids, "connections": connection_count}
+
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 def register_chain_builder_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
-    """Register the build_effects_chain MCP tool."""
+    """Register the build_effects_chain and rewire_chain MCP tools."""
+
+    @mcp.tool()
+    def rewire_chain(plugin_ids: List[int]) -> str:
+        """Rewire the internal chain of this child instance to the given plugin order.
+
+        Disconnects all existing internal patchbay connections, then re-wires
+        system-in → plugin_ids[0] → … → plugin_ids[-1] → system-out using
+        auto-detected mono/stereo routing.
+
+        Args:
+            plugin_ids: Ordered list of current Carla plugin IDs for the chain.
+
+        Returns:
+            JSON result with success status, plugin_order, and connections count.
+        """
+        if not bridge:
+            return json.dumps({"success": False, "error": "Backend not available"})
+
+        result = rewire_chain_connections(bridge, plugin_ids)
+        return json.dumps(result)
 
     @mcp.tool()
     def build_effects_chain(

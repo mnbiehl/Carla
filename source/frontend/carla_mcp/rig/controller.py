@@ -1,9 +1,10 @@
 """
 RigController: node lifecycle management for the in-memory rig graph.
 
-Handles create_bus, create_track, and remove_node by coordinating between the
-rig graph, the chain launcher (which spawns Carla sub-processes), and the
-JACK router (which undoes PipeWire's hardware auto-connections).
+Handles create_bus, create_track, remove_node, add_effect, and remove_effect
+by coordinating between the rig graph, the chain launcher (which spawns Carla
+sub-processes), the JACK router (which undoes PipeWire's hardware
+auto-connections), and RemoteInstance (which drives each child's MCP tools).
 
 Physical audio wiring between nodes (pw-link) is deferred to a later
 increment.  This module only manages the graph and Carla process lifecycle.
@@ -13,9 +14,10 @@ from __future__ import annotations
 
 import logging
 import time as time_module
-from typing import Callable
+from typing import Callable, Optional
 
-from carla_mcp.rig.graph import Node, RigGraph
+from carla_mcp.rig.graph import Effect, Node, RigGraph
+from carla_mcp.rig.remote import RemoteInstance
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +47,52 @@ class RigController:
         chain_launcher,
         jack_router,
         sleep: Callable[[float], None] = time_module.sleep,
+        remote_factory: Optional[Callable] = None,
     ) -> None:
         self._graph = graph
         self._instance_manager = instance_manager
         self._chain_launcher = chain_launcher
         self._jack_router = jack_router
         self._sleep = sleep
+        self._remote_factory = remote_factory
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _remote(self, node: Node) -> RemoteInstance:
+        """Return a RemoteInstance for *node*'s Carla child process.
+
+        If a ``remote_factory`` was injected (e.g. in tests), call it with
+        *node* and return the result.  Otherwise, build a production
+        RemoteInstance over SSE using the instance's ``mcp_port``.
+
+        Args:
+            node: The graph node whose child instance to connect to.
+
+        Returns:
+            A :class:`RemoteInstance` targeting *node*'s child.
+        """
+        if self._remote_factory is not None:
+            return self._remote_factory(node)
+        instance = self._instance_manager.get(node.instance)
+        sse_url = f"http://127.0.0.1:{instance.mcp_port}/sse"
+        return RemoteInstance.over_sse(sse_url)
+
+    async def _refresh_ids(self, node: Node) -> None:
+        """Re-resolve every effect's plugin_id from the child's live handle map.
+
+        Carla's plugin IDs shift on add/remove.  After any mutation, call this
+        to sync ``effect.plugin_id`` values with what the child actually has.
+
+        Args:
+            node: The graph node whose effects chain to refresh.
+        """
+        remote = self._remote(node)
+        handles = await remote.list_handles()  # {plugin_id: handle}
+        inverted = {h: pid for pid, h in handles.items()}
+        for eff in node.effects:
+            eff.plugin_id = inverted.get(eff.handle)
 
     def _settle_instance(self, jack_client_name: str) -> int:
         """Undo PipeWire hardware auto-connections for a freshly spawned client.
@@ -235,3 +273,150 @@ class RigController:
         self._graph.remove_node(name)
 
         return {"success": True, "message": f"Removed node '{name}'"}
+
+    async def add_effect(
+        self,
+        node_name: str,
+        plugin: str,
+        role: str,
+        position: object = "end",
+    ) -> dict:
+        """Add a plugin effect to a track or bus node's chain.
+
+        Loads the plugin on the child Carla instance, stamps a stable handle,
+        updates the graph, re-resolves all plugin IDs, and rewires the chain.
+
+        Parameters
+        ----------
+        node_name:
+            Name of the target track or bus node.
+        plugin:
+            Plugin name/label to load (e.g. "mcompressor").
+        role:
+            Human role label unique within this node (e.g. "comp").
+        position:
+            Insertion point — "end", "start", "before:<role>",
+            "after:<role>", or an integer index.  Defaults to "end".
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "node": ..., "role": ..., "handle": ...,
+               "order": [...]}`` on success, or
+            ``{"success": False, "message": ..., "error": ...}`` on failure.
+        """
+        try:
+            node = self._graph.get_node(node_name)
+        except KeyError:
+            return {"success": False, "message": f"Node '{node_name}' not found"}
+
+        if node.kind not in ("track", "bus"):
+            return {
+                "success": False,
+                "message": (
+                    f"Node '{node_name}' is kind '{node.kind}'; "
+                    "effects chains are only supported on 'track' and 'bus' nodes"
+                ),
+            }
+
+        try:
+            remote = self._remote(node)
+
+            # new_id = current plugin count (Carla appends, so id == count)
+            new_id = len(node.effects)
+
+            await remote.add_plugin(plugin)
+
+            handle = f"{node_name}/{role}"
+            await remote.set_handle(new_id, handle)
+
+            effect = Effect(handle=handle, role=role, plugin=plugin, plugin_id=new_id)
+            self._graph.add_effect(node_name, effect, position)
+
+            await self._refresh_ids(node)
+
+            ordered = [e.plugin_id for e in node.effects]
+            await remote.rewire_chain(ordered)
+
+            return {
+                "success": True,
+                "node": node_name,
+                "role": role,
+                "handle": handle,
+                "order": ordered,
+            }
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to add effect: {exc}", "error": str(exc)}
+
+    async def remove_effect(self, node_name: str, role_or_handle: str) -> dict:
+        """Remove an effect from a track or bus node's chain.
+
+        Re-resolves plugin IDs before removal to account for prior shifts,
+        removes the plugin from the child Carla instance, removes the effect
+        from the graph, refreshes IDs again, and rewires the chain.
+
+        Parameters
+        ----------
+        node_name:
+            Name of the target track or bus node.
+        role_or_handle:
+            The effect's role or stable handle to remove.
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "node": ..., "removed": ..., "order": [...]}``
+            on success, ``{"success": False, "message": ...}`` if the effect
+            is not found, or ``{"success": False, "error": ...}`` on exception.
+        """
+        try:
+            node = self._graph.get_node(node_name)
+        except KeyError:
+            return {"success": False, "message": f"Node '{node_name}' not found"}
+
+        if node.kind not in ("track", "bus"):
+            return {
+                "success": False,
+                "message": (
+                    f"Node '{node_name}' is kind '{node.kind}'; "
+                    "effects chains are only supported on 'track' and 'bus' nodes"
+                ),
+            }
+
+        # Refresh IDs first so we have accurate plugin_id values
+        try:
+            await self._refresh_ids(node)
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to refresh IDs: {exc}", "error": str(exc)}
+
+        effect = self._graph.find_effect(node_name, role_or_handle)
+        if effect is None:
+            return {
+                "success": False,
+                "message": (
+                    f"No effect with role or handle '{role_or_handle}' "
+                    f"in node '{node_name}'"
+                ),
+            }
+
+        plugin_id = effect.plugin_id
+
+        try:
+            remote = self._remote(node)
+            await remote.remove_plugin(plugin_id)
+
+            self._graph.remove_effect(node_name, role_or_handle)
+
+            await self._refresh_ids(node)
+
+            ordered = [e.plugin_id for e in node.effects]
+            await remote.rewire_chain(ordered)
+
+            return {
+                "success": True,
+                "node": node_name,
+                "removed": role_or_handle,
+                "order": ordered,
+            }
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to remove effect: {exc}", "error": str(exc)}

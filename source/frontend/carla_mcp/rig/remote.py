@@ -146,6 +146,20 @@ class RemoteInstance:
         except (json.JSONDecodeError, ValueError):
             return {}
 
+    async def rewire_chain(self, plugin_ids: list[int]) -> str:
+        """Rewire the child instance's internal chain to the given plugin order.
+
+        Calls the child's ``rewire_chain`` tool, which disconnects existing
+        internal connections and re-wires them in the specified order.
+
+        Args:
+            plugin_ids: Ordered list of plugin IDs for the new chain.
+
+        Returns:
+            Raw response string from the child's rewire_chain tool.
+        """
+        return await self._call_tool("rewire_chain", {"plugin_ids": plugin_ids})
+
     async def resolve_handle(self, handle: str) -> int | None:
         """Find the plugin_id whose handle matches *handle* on the child instance.
 
