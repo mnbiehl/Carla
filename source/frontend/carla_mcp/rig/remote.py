@@ -160,6 +160,40 @@ class RemoteInstance:
         """
         return await self._call_tool("rewire_chain", {"plugin_ids": plugin_ids})
 
+    async def set_active(self, plugin_id: int, active: bool) -> str:
+        """Set the active (non-bypassed) state of a plugin on the child instance.
+
+        Args:
+            plugin_id: Plugin ID (0-based).
+            active:    True to activate the plugin; False to bypass it.
+
+        Returns:
+            Raw response string from the child's set_plugin_active tool.
+        """
+        return await self._call_tool(
+            "set_plugin_active", {"plugin_id": plugin_id, "active": active}
+        )
+
+    async def get_parameters(self, plugin_id: int) -> list[dict]:
+        """Return the parameter list for a plugin on the child instance.
+
+        Calls ``get_plugin_parameters`` on the child and parses the JSON
+        response.  Returns the ``"parameters"`` list, or an empty list if
+        the response cannot be parsed or is missing the key.
+
+        Args:
+            plugin_id: Plugin ID (0-based).
+
+        Returns:
+            List of parameter detail dicts from the child.
+        """
+        raw = await self._call_tool("get_plugin_parameters", {"plugin_id": plugin_id})
+        try:
+            data = json.loads(raw)
+            return data.get("parameters", [])
+        except (json.JSONDecodeError, AttributeError, ValueError):
+            return []
+
     async def resolve_handle(self, handle: str) -> int | None:
         """Find the plugin_id whose handle matches *handle* on the child instance.
 

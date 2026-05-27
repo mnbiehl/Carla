@@ -420,3 +420,241 @@ class RigController:
             }
         except Exception as exc:
             return {"success": False, "message": f"Failed to remove effect: {exc}", "error": str(exc)}
+
+    async def move_effect(
+        self,
+        node_name: str,
+        role_or_handle: str,
+        position: object,
+    ) -> dict:
+        """Move an existing effect to a new position in a track or bus chain.
+
+        Re-resolves plugin IDs before and after the move, then rewires the
+        child Carla chain to match the new order.
+
+        Parameters
+        ----------
+        node_name:
+            Name of the target track or bus node.
+        role_or_handle:
+            The effect's role or stable handle to move.
+        position:
+            Target position — "end", "start", "before:<role>",
+            "after:<role>", or an integer index.
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "node": ..., "role_or_handle": ..., "order": [...]}``
+            on success, or ``{"success": False, "message": ...}`` on failure.
+        """
+        try:
+            node = self._graph.get_node(node_name)
+        except KeyError:
+            return {"success": False, "message": f"Node '{node_name}' not found"}
+
+        if node.kind not in ("track", "bus"):
+            return {
+                "success": False,
+                "message": (
+                    f"Node '{node_name}' is kind '{node.kind}'; "
+                    "effects chains are only supported on 'track' and 'bus' nodes"
+                ),
+            }
+
+        try:
+            await self._refresh_ids(node)
+
+            self._graph.move_effect(node_name, role_or_handle, position)
+
+            await self._refresh_ids(node)
+
+            ordered = [e.plugin_id for e in node.effects]
+            await self._remote(node).rewire_chain(ordered)
+
+            return {
+                "success": True,
+                "node": node_name,
+                "role_or_handle": role_or_handle,
+                "order": ordered,
+            }
+        except (ValueError, IndexError) as exc:
+            return {"success": False, "message": str(exc)}
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to move effect: {exc}", "error": str(exc)}
+
+    async def bypass(
+        self,
+        node_name: str,
+        role_or_handle: str,
+        on: bool = True,
+    ) -> dict:
+        """Bypass or un-bypass an effect in a track or bus chain.
+
+        Bypass ON means the plugin is inactive in Carla (``set_active(False)``);
+        bypass OFF means the plugin is active (``set_active(True)``).
+
+        Parameters
+        ----------
+        node_name:
+            Name of the target track or bus node.
+        role_or_handle:
+            The effect's role or stable handle.
+        on:
+            True to bypass the effect; False to un-bypass it.
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "node": ..., "role": ..., "bypassed": ...}``
+            on success, or ``{"success": False, "message": ...}`` on failure.
+        """
+        try:
+            node = self._graph.get_node(node_name)
+        except KeyError:
+            return {"success": False, "message": f"Node '{node_name}' not found"}
+
+        if node.kind not in ("track", "bus"):
+            return {
+                "success": False,
+                "message": (
+                    f"Node '{node_name}' is kind '{node.kind}'; "
+                    "effects chains are only supported on 'track' and 'bus' nodes"
+                ),
+            }
+
+        try:
+            await self._refresh_ids(node)
+
+            effect = self._graph.find_effect(node_name, role_or_handle)
+            if effect is None:
+                return {
+                    "success": False,
+                    "message": (
+                        f"No effect with role or handle '{role_or_handle}' "
+                        f"in node '{node_name}'"
+                    ),
+                }
+
+            await self._remote(node).set_active(effect.plugin_id, not on)
+            effect.bypassed = on
+
+            return {
+                "success": True,
+                "node": node_name,
+                "role": effect.role,
+                "bypassed": effect.bypassed,
+            }
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to bypass effect: {exc}", "error": str(exc)}
+
+    async def set_param(
+        self,
+        node_name: str,
+        role_or_handle: str,
+        param: str,
+        value: float,
+    ) -> dict:
+        """Set a named parameter on an effect in a track or bus chain.
+
+        Resolves the parameter by case-insensitive name match from the child's
+        live parameter list.  Values are passed in the plugin's native units
+        (no dB conversion is applied).
+
+        Parameters
+        ----------
+        node_name:
+            Name of the target track or bus node.
+        role_or_handle:
+            The effect's role or stable handle.
+        param:
+            Parameter name to set (case-insensitive).
+        value:
+            New parameter value in the plugin's native unit.
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "node": ..., "role": ..., "param": ...,
+               "param_index": ..., "value": ...}`` plus any range fields from
+            the matched param dict, on success.
+            ``{"success": False, "message": ...}`` on failure.
+        """
+        try:
+            node = self._graph.get_node(node_name)
+        except KeyError:
+            return {"success": False, "message": f"Node '{node_name}' not found"}
+
+        if node.kind not in ("track", "bus"):
+            return {
+                "success": False,
+                "message": (
+                    f"Node '{node_name}' is kind '{node.kind}'; "
+                    "effects chains are only supported on 'track' and 'bus' nodes"
+                ),
+            }
+
+        try:
+            await self._refresh_ids(node)
+
+            effect = self._graph.find_effect(node_name, role_or_handle)
+            if effect is None:
+                return {
+                    "success": False,
+                    "message": (
+                        f"No effect with role or handle '{role_or_handle}' "
+                        f"in node '{node_name}'"
+                    ),
+                }
+
+            params = await self._remote(node).get_parameters(effect.plugin_id)
+
+            param_lower = param.lower()
+            matched: dict | None = None
+            for p in params:
+                name_val = p.get("name", "")
+                if isinstance(name_val, str) and name_val.lower() == param_lower:
+                    matched = p
+                    break
+
+            if matched is None:
+                return {
+                    "success": False,
+                    "message": (
+                        f"No parameter named '{param}' on effect '{role_or_handle}' "
+                        f"in node '{node_name}'"
+                    ),
+                }
+
+            # Resolve the numeric parameter index: prefer an explicit index/id
+            # field, fall back to the param's position in the list.
+            param_index: int | None = None
+            for key in ("index", "id", "parameter_id"):
+                if key in matched:
+                    try:
+                        param_index = int(matched[key])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if param_index is None:
+                param_index = params.index(matched)
+
+            await self._remote(node).set_parameter(effect.plugin_id, param_index, value)
+
+            # Build the response: always include core fields plus any range fields
+            # present in the param dict so the caller sees the native scale.
+            result: dict = {
+                "success": True,
+                "node": node_name,
+                "role": effect.role,
+                "param": param,
+                "param_index": param_index,
+                "value": value,
+            }
+            for range_key in ("min", "max", "default", "minimum", "maximum"):
+                if range_key in matched:
+                    result[range_key] = matched[range_key]
+
+            return result
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to set parameter: {exc}", "error": str(exc)}
