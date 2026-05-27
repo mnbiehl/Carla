@@ -27,6 +27,8 @@ backend_bridge = None
 instance_manager = None
 chain_launcher = None
 jack_router = None
+rig_graph = None
+rig_controller = None
 
 # Import tool registration functions
 from .tools.connection import register_connection_tools
@@ -310,6 +312,21 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
 
         register_orchestration_tools(mcp_server, chain_launcher, jack_router, instance_manager)
         logger.info("Orchestration tools registered")
+
+        # Create rig graph and controller, then register rig tools
+        from .rig.graph import RigGraph
+        from .rig import RigController, register_rig_tools
+
+        global rig_graph, rig_controller
+        rig_graph = RigGraph()
+        rig_controller = RigController(
+            rig_graph,
+            instance_manager,
+            chain_launcher,
+            jack_router,
+        )
+        register_rig_tools(mcp_server, rig_controller)
+        logger.info("Rig tools registered")
 
         # Register custom endpoints including SSE monitoring
         register_custom_endpoints()

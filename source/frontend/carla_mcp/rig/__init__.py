@@ -13,6 +13,7 @@ from carla_mcp.rig.handles import HANDLE_KEY, stamp_handle, resolve_handle, read
 from carla_mcp.rig.describe import describe_rig
 from carla_mcp.rig.remote import RemoteInstance
 from carla_mcp.rig.controller import RigController
+from carla_mcp.rig.register import register_rig_tools
 
 __all__ = [
     "Effect",
@@ -26,4 +27,5 @@ __all__ = [
     "describe_rig",
     "RemoteInstance",
     "RigController",
+    "register_rig_tools",
 ]

@@ -43,6 +43,9 @@ class RigController:
     sleep:
         Callable used to pause between settle iterations.  Defaults to
         :func:`time.sleep`; inject ``lambda *_: None`` in tests.
+    plugin_db:
+        Optional :class:`PluginDatabase` for plugin search.  When ``None``,
+        :meth:`find_plugins` returns an unavailable error.
     """
 
     def __init__(
@@ -56,6 +59,7 @@ class RigController:
         list_outputs: Callable[[], List[str]] = pw_link_list_outputs,
         list_inputs: Callable[[], List[str]] = pw_link_list_inputs,
         monitor_ports: Callable[[], List[str]] = find_monitor_output_ports,
+        plugin_db=None,
     ) -> None:
         self._graph = graph
         self._instance_manager = instance_manager
@@ -66,6 +70,7 @@ class RigController:
         self._list_outputs = list_outputs
         self._list_inputs = list_inputs
         self._monitor_ports = monitor_ports
+        self._plugin_db = plugin_db
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -914,3 +919,105 @@ class RigController:
             return result
         except Exception as exc:
             return {"success": False, "message": f"Failed to set parameter: {exc}", "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Discovery helpers
+    # ------------------------------------------------------------------
+
+    def list_io(self) -> dict:
+        """Return discovered I/O ports and current endpoint aliases.
+
+        Sources are JACK output ports that can feed tracks: capture inputs
+        plus any looper outputs discovered via :attr:`_list_outputs`.
+        Sinks are PipeWire input ports from :attr:`_list_inputs` plus
+        monitor ports from :attr:`_monitor_ports`.
+        Aliases are the friendly names already registered in the graph as
+        endpoint nodes — mapping ``{node.name: node.jack_client}``.
+
+        Returns
+        -------
+        dict
+            ``{"sources": [...], "sinks": [...], "aliases": {name: port}}``
+        """
+        sources = self._list_outputs()
+        sinks = list(self._list_inputs()) + list(self._monitor_ports())
+        aliases = {
+            node.name: node.jack_client
+            for node in self._graph.nodes.values()
+            if node.kind == "endpoint"
+        }
+        return {"sources": sources, "sinks": sinks, "aliases": aliases}
+
+    def alias_input(self, port: str, name: str) -> dict:
+        """Register a friendly endpoint alias for a raw JACK port.
+
+        Creates a new endpoint node ``name`` in the graph so that
+        ``route(name, ...)`` resolves to ``port``.  Use this to give
+        human-readable names to hardware inputs before building tracks.
+
+        Parameters
+        ----------
+        port:
+            Raw JACK port string (e.g. ``"alsa_input.usb:capture_AUX0"``).
+        name:
+            Friendly alias to register (e.g. ``"in:guitar"``).
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "name": ..., "port": ...}`` on success, or
+            ``{"success": False, "message": ...}`` if the name already exists.
+        """
+        if self._graph.has_node(name):
+            return {
+                "success": False,
+                "message": f"Node '{name}' already exists in the rig graph",
+            }
+        self._graph.add_node(Node(name=name, kind="endpoint", jack_client=port))
+        return {"success": True, "name": name, "port": port}
+
+    def find_plugins(
+        self,
+        query: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> dict:
+        """Search available plugins in the plugin database.
+
+        Parameters
+        ----------
+        query:
+            Case-insensitive substring to match against plugin name, label,
+            or maker.  ``None`` or empty string returns all plugins.
+        category:
+            Exact (case-insensitive) category to filter by.  ``None`` means
+            no category filter.
+
+        Returns
+        -------
+        dict
+            ``{"success": True, "plugins": [{name, label, category, ...}, ...]}``
+            capped at 50 results, or ``{"success": False, "message": ...,
+            "plugins": []}`` when the database is unavailable.
+        """
+        if self._plugin_db is None:
+            return {
+                "success": False,
+                "message": "plugin database unavailable",
+                "plugins": [],
+            }
+
+        # Start from a query or full list
+        if query:
+            results = self._plugin_db.search_plugins(query)
+        else:
+            results = self._plugin_db.get_all_plugins()
+
+        # Apply optional category filter
+        if category:
+            cat_lower = category.lower()
+            results = [p for p in results if p.category.lower() == cat_lower]
+
+        # Convert to dicts and cap at 50
+        plugins = [p.to_dict() for p in results[:50]]
+
+        return {"success": True, "plugins": plugins}
