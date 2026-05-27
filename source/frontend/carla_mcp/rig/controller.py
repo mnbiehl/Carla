@@ -6,18 +6,23 @@ by coordinating between the rig graph, the chain launcher (which spawns Carla
 sub-processes), the JACK router (which undoes PipeWire's hardware
 auto-connections), and RemoteInstance (which drives each child's MCP tools).
 
-Physical audio wiring between nodes (pw-link) is deferred to a later
-increment.  This module only manages the graph and Carla process lifecycle.
+Physical audio wiring between nodes (pw-link) is performed by route/unroute
+and is called automatically from create_track.
 """
 
 from __future__ import annotations
 
 import logging
 import time as time_module
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from carla_mcp.rig.graph import Effect, Node, RigGraph
 from carla_mcp.rig.remote import RemoteInstance
+from carla_mcp.utils.pw_link import (
+    find_monitor_output_ports,
+    pw_link_list_inputs,
+    pw_link_list_outputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,9 @@ class RigController:
         jack_router,
         sleep: Callable[[float], None] = time_module.sleep,
         remote_factory: Optional[Callable] = None,
+        list_outputs: Callable[[], List[str]] = pw_link_list_outputs,
+        list_inputs: Callable[[], List[str]] = pw_link_list_inputs,
+        monitor_ports: Callable[[], List[str]] = find_monitor_output_ports,
     ) -> None:
         self._graph = graph
         self._instance_manager = instance_manager
@@ -55,6 +63,9 @@ class RigController:
         self._jack_router = jack_router
         self._sleep = sleep
         self._remote_factory = remote_factory
+        self._list_outputs = list_outputs
+        self._list_inputs = list_inputs
+        self._monitor_ports = monitor_ports
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -118,6 +129,238 @@ class RigController:
         return removed
 
     # ------------------------------------------------------------------
+    # Port-resolution helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_stereo_ports(self, base: str, available: List[str]) -> List[str]:
+        """Resolve a port base string to concrete port names from *available*.
+
+        Resolution order:
+        1. ``{base}_l`` and ``{base}_r`` both present → return those two.
+        2. ``{base}1`` and ``{base}2`` both present → return those two.
+        3. ``{base}`` itself present → return ``[base]`` (mono).
+        4. Nothing matched → return ``[]``.
+
+        Args:
+            base:      The port base string to resolve (e.g. "looperdooper:loop0_out").
+            available: The full list of available port names to search in.
+
+        Returns:
+            A list of one or two concrete port strings, or an empty list.
+        """
+        available_set = set(available)
+        if f"{base}_l" in available_set and f"{base}_r" in available_set:
+            return [f"{base}_l", f"{base}_r"]
+        if f"{base}1" in available_set and f"{base}2" in available_set:
+            return [f"{base}1", f"{base}2"]
+        if base in available_set:
+            return [base]
+        return []
+
+    def _source_ports(self, node: Node) -> List[str]:
+        """Return the concrete output port names for *node*.
+
+        For track/bus nodes: ``["{jack_client}:audio-out1", "{jack_client}:audio-out2"]``.
+        For endpoint nodes: resolved via :meth:`_resolve_stereo_ports` against
+        the live list of PipeWire output ports.
+
+        Args:
+            node: The graph node to resolve output ports for.
+
+        Returns:
+            A list of port name strings (may be empty for unresolvable endpoints).
+        """
+        if node.kind in ("track", "bus"):
+            return [
+                f"{node.jack_client}:audio-out1",
+                f"{node.jack_client}:audio-out2",
+            ]
+        return self._resolve_stereo_ports(node.jack_client, self._list_outputs())
+
+    def _sink_ports(self, node: Node) -> List[str]:
+        """Return the concrete input port names for *node*.
+
+        For track/bus nodes: ``["{jack_client}:audio-in1", "{jack_client}:audio-in2"]``.
+        For the ``"out:main"`` endpoint: the monitor output ports from
+        :attr:`_monitor_ports`.
+        For other endpoint nodes: resolved via :meth:`_resolve_stereo_ports`
+        against the live list of PipeWire input ports.
+
+        Args:
+            node: The graph node to resolve input ports for.
+
+        Returns:
+            A list of port name strings (may be empty for unresolvable endpoints).
+        """
+        if node.kind in ("track", "bus"):
+            return [
+                f"{node.jack_client}:audio-in1",
+                f"{node.jack_client}:audio-in2",
+            ]
+        if node.name == "out:main":
+            return self._monitor_ports()
+        return self._resolve_stereo_ports(node.jack_client, self._list_inputs())
+
+    def _connect_port_pairs(
+        self, src_ports: List[str], dst_ports: List[str]
+    ) -> tuple[list[tuple[str, str]], str | None]:
+        """Connect port pairs according to mono/stereo pairing rules.
+
+        Pairing rules:
+        - 2 src, 2 dst → connect [0]→[0] and [1]→[1].
+        - 1 src, 2 dst → connect src[0]→dst[0] and src[0]→dst[1] (mono fan-out).
+        - 2 src, 1 dst → connect src[0]→dst[0] and src[1]→dst[0] (stereo sum).
+        - 1 src, 1 dst → connect src[0]→dst[0].
+
+        Args:
+            src_ports: Resolved source port names.
+            dst_ports: Resolved destination port names.
+
+        Returns:
+            A tuple of ``(pairs, error_message)`` where *pairs* is the list of
+            ``(src, dst)`` strings that were successfully connected, and
+            *error_message* is ``None`` on full success or a string describing
+            the first failure.
+        """
+        n_src, n_dst = len(src_ports), len(dst_ports)
+        if n_src == 2 and n_dst == 2:
+            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[1])]
+        elif n_src == 1 and n_dst == 2:
+            pairs = [(src_ports[0], dst_ports[0]), (src_ports[0], dst_ports[1])]
+        elif n_src == 2 and n_dst == 1:
+            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[0])]
+        else:
+            pairs = [(src_ports[0], dst_ports[0])]
+
+        connected: list[tuple[str, str]] = []
+        for s, d in pairs:
+            result = self._jack_router.connect(s, d)
+            if not result.success:
+                return connected, f"Failed to connect {s} -> {d}: {result.message}"
+            connected.append((s, d))
+        return connected, None
+
+    # ------------------------------------------------------------------
+    # route / unroute
+    # ------------------------------------------------------------------
+
+    def route(self, src: str, dst: str) -> dict:
+        """Wire audio from *src* to *dst* via pw-link and record the graph edge.
+
+        If either name is not yet in the graph it is auto-created as an
+        endpoint node (so callers can route to ``"out:main"`` etc. without
+        pre-declaring).
+
+        Args:
+            src: Name of the source node (or endpoint base string).
+            dst: Name of the destination node (or endpoint base string).
+
+        Returns:
+            ``{"success": True, "pairs": [...]}`` on success, or
+            ``{"success": False, "message": ..., "pairs": [...]}`` on failure.
+            *pairs* lists the ``(src_port, dst_port)`` strings that were
+            connected before any failure.
+        """
+        for name in (src, dst):
+            if not self._graph.has_node(name):
+                self._graph.add_node(Node(name=name, kind="endpoint", jack_client=name))
+
+        src_node = self._graph.get_node(src)
+        dst_node = self._graph.get_node(dst)
+
+        src_ports = self._source_ports(src_node)
+        dst_ports = self._sink_ports(dst_node)
+
+        if not src_ports:
+            return {
+                "success": False,
+                "message": f"Could not resolve source ports for '{src}'",
+                "pairs": [],
+            }
+        if not dst_ports:
+            return {
+                "success": False,
+                "message": f"Could not resolve sink ports for '{dst}'",
+                "pairs": [],
+            }
+
+        connected, error = self._connect_port_pairs(src_ports, dst_ports)
+
+        if error is not None:
+            return {"success": False, "message": error, "pairs": connected}
+
+        self._graph.add_edge(src, dst)
+
+        return {
+            "success": True,
+            "message": f"Routed '{src}' -> '{dst}'",
+            "pairs": connected,
+        }
+
+    def unroute(self, src: str, dst: str) -> dict:
+        """Remove the audio connection from *src* to *dst* and update the graph.
+
+        Args:
+            src: Name of the source node.
+            dst: Name of the destination node.
+
+        Returns:
+            ``{"success": True, "message": ..., "disconnect_failures": int}``
+            on success (individual disconnect failures are reported but do not
+            fail the call), or ``{"success": False, "message": ...}`` if a
+            node is missing.
+        """
+        for name in (src, dst):
+            if not self._graph.has_node(name):
+                return {
+                    "success": False,
+                    "message": f"Node '{name}' not found in the rig graph",
+                }
+
+        src_node = self._graph.get_node(src)
+        dst_node = self._graph.get_node(dst)
+
+        src_ports = self._source_ports(src_node)
+        dst_ports = self._sink_ports(dst_node)
+
+        # Build pairs using the same pairing logic as route.
+        n_src, n_dst = len(src_ports), len(dst_ports)
+        if n_src == 2 and n_dst == 2:
+            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[1])]
+        elif n_src == 1 and n_dst == 2:
+            pairs = [(src_ports[0], dst_ports[0]), (src_ports[0], dst_ports[1])]
+        elif n_src == 2 and n_dst == 1:
+            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[0])]
+        elif n_src == 1 and n_dst == 1:
+            pairs = [(src_ports[0], dst_ports[0])]
+        else:
+            pairs = []
+
+        failures = 0
+        for s, d in pairs:
+            result = self._jack_router.disconnect(s, d)
+            if not result.success:
+                failures += 1
+                logger.warning("Disconnect failed for %s -> %s: %s", s, d, result.message)
+
+        # Remove the graph edge (guard against missing edge).
+        note = None
+        try:
+            self._graph.remove_edge(src, dst)
+        except KeyError:
+            note = f"No graph edge '{src}' -> '{dst}' was recorded"
+
+        msg = f"Unrouted '{src}' -> '{dst}'"
+        if note:
+            msg = f"{msg} (note: {note})"
+
+        return {
+            "success": True,
+            "message": msg,
+            "disconnect_failures": failures,
+        }
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -171,8 +414,10 @@ class RigController:
         """Create a new track node wired from *source*, launching a Carla instance.
 
         If *source* does not already exist as a graph node an endpoint node is
-        auto-created for it.  Physical audio wiring (pw-link) is NOT performed
-        here — the edge is recorded in the graph as an intent only.
+        auto-created for it.  After registering the track node, the source is
+        physically wired to the track via :meth:`route` (which also records the
+        graph edge).  If routing fails the node is still created but the return
+        dict includes a ``"wiring"`` key with the route failure details.
 
         Parameters
         ----------
@@ -184,7 +429,7 @@ class RigController:
         Returns
         -------
         dict
-            ``{"success": True, ...}`` on success, or
+            ``{"success": True, ..., "wiring": {...}}`` on success, or
             ``{"success": False, "message": ...}`` on failure.
         """
         if self._graph.has_node(name):
@@ -220,10 +465,17 @@ class RigController:
             )
         )
 
-        # Record the intent edge (physical wiring deferred to a later increment).
-        self._graph.add_edge(source, name)
+        # Physically wire source → track (route also records the graph edge).
+        route_result = self.route(source, name)
+        if not route_result["success"]:
+            logger.warning(
+                "create_track '%s': routing from '%s' failed: %s",
+                name,
+                source,
+                route_result.get("message"),
+            )
 
-        return {
+        result: dict = {
             "success": True,
             "message": (
                 f"Created track '{name}' sourced from '{source}' "
@@ -233,7 +485,11 @@ class RigController:
             "jack_client": instance.jack_client_name,
             "source": source,
             "source_was_new": source_was_new,
+            "wiring": route_result,
         }
+        if not route_result["success"]:
+            result["warning"] = f"Routing failed: {route_result.get('message')}"
+        return result
 
     def remove_node(self, name: str) -> dict:
         """Remove a node from the graph, terminating its Carla instance if any.

@@ -24,19 +24,38 @@ def _make_instance(name: str, mcp_port: int = 3003) -> SimpleNamespace:
 
 
 def _make_controller(graph=None):
-    """Return a (controller, graph, mocks) tuple with a no-op sleep."""
+    """Return a (controller, graph, mocks) tuple with a no-op sleep.
+
+    Port-listing callables are injected so that route() calls inside
+    create_track do not shell out to pw-link.  The lists are populated with
+    enough entries so that endpoint port resolution succeeds (mono fallback):
+    any port name that matches a node's jack_client verbatim is present.
+    The jack_router.connect mock returns a success result by default.
+    """
     if graph is None:
         graph = RigGraph()
     instance_manager = MagicMock()
     chain_launcher = MagicMock()
     jack_router = MagicMock()
     jack_router.disconnect_client_from_system.return_value = 0
+    # route() calls jack_router.connect; default to success.
+    from carla_mcp.orchestration.jack_router import RouteResult
+    jack_router.connect.return_value = RouteResult(success=True)
+    jack_router.disconnect.return_value = RouteResult(success=True)
+
+    # Provide port lists that satisfy mono-fallback resolution for any
+    # endpoint whose jack_client is used directly as a port name (e.g. "in:guitar").
+    # Track/bus ports are fixed strings and do not consult these lists.
+    _known_endpoints = ["in:guitar", "in:bass", "in:keys", "looperdooper:out"]
     ctrl = RigController(
         graph=graph,
         instance_manager=instance_manager,
         chain_launcher=chain_launcher,
         jack_router=jack_router,
         sleep=lambda *_: None,
+        list_outputs=lambda: list(_known_endpoints),
+        list_inputs=lambda: list(_known_endpoints),
+        monitor_ports=lambda: [],
     )
     return ctrl, graph, chain_launcher, jack_router, instance_manager
 
@@ -156,14 +175,17 @@ class TestCreateTrack:
         assert len(edges) == 1
         assert edges[0].dst == "strat"
 
-    def test_does_not_call_jack_router_connect(self):
+    def test_calls_jack_router_connect_to_wire_source(self):
         ctrl, graph, launcher, router, _ = _make_controller()
         launcher.launch.return_value = _make_instance("strat")
 
-        ctrl.create_track("strat", "in:guitar")
+        result = ctrl.create_track("strat", "in:guitar")
 
-        # The router must NOT have a `connect` call — physical wiring is deferred.
-        router.connect.assert_not_called()
+        # create_track now wires the source → track via route(), which calls
+        # jack_router.connect for the CarlaChain port pairs.
+        assert router.connect.called
+        # The result must include wiring info.
+        assert "wiring" in result
 
     def test_source_already_exists_not_duplicated(self):
         ctrl, graph, launcher, router, _ = _make_controller()
