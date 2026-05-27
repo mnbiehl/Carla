@@ -13,6 +13,7 @@ from ..backend.backend_bridge import CarlaBackendBridge
 from ..discovery.plugin_discoverer import PluginDiscoverer
 from ..utils.error_handler import get_error_handler
 from carla_backend import CUSTOM_DATA_TYPE_PATH
+from carla_mcp.rig.handles import HANDLE_KEY
 
 # Global instances - will be initialized in main.py
 backend_bridge: CarlaBackendBridge = None
@@ -674,3 +675,52 @@ def register_plugin_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                 
         except Exception as e:
             return f"❌ Error adding plugin: {e}"
+
+    @mcp.tool()
+    def set_plugin_handle(plugin_id: int, handle: str) -> str:
+        """Stamp a stable handle string into a plugin's Carla custom-data.
+
+        Args:
+            plugin_id: Plugin ID (0-based index)
+            handle:    Stable handle to persist, e.g. "strat/comp"
+
+        Returns:
+            Status message
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available"
+        if backend_bridge.set_custom_data(plugin_id, "string", HANDLE_KEY, handle):
+            return f"✅ Set handle for plugin {plugin_id}: {handle}"
+        return f"❌ Failed to set handle for plugin {plugin_id}"
+
+    @mcp.tool()
+    def get_plugin_handle(plugin_id: int) -> str:
+        """Return the handle stamped on a plugin, or empty string if none.
+
+        Args:
+            plugin_id: Plugin ID (0-based index)
+
+        Returns:
+            The handle string, or "" if not stamped
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available"
+        value = backend_bridge.get_custom_data_value(plugin_id, "string", HANDLE_KEY)
+        return value if value else ""
+
+    @mcp.tool()
+    def list_plugin_handles() -> str:
+        """Return a JSON object mapping plugin_id → handle for every plugin with a handle.
+
+        Returns:
+            JSON object string, e.g. {"0": "strat/comp", "1": "strat/amp"}
+        """
+        if not backend_bridge:
+            return "❌ Backend API not available"
+        count = backend_bridge.get_plugin_count()
+        handles = {}
+        for pid in range(count):
+            value = backend_bridge.get_custom_data_value(pid, "string", HANDLE_KEY)
+            if value:
+                handles[str(pid)] = value
+        return json.dumps(handles)
