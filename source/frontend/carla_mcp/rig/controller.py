@@ -750,25 +750,17 @@ class RigController:
         role_or_handle: str,
         on: bool = True,
     ) -> dict:
-        """Bypass or un-bypass an effect in a track or bus chain.
+        """Bypass or un-bypass an effect by rewiring around it in the chain.
 
-        Bypass ON means the plugin is inactive in Carla (``set_active(False)``);
-        bypass OFF means the plugin is active (``set_active(True)``).
+        Bypass ON: the effect is removed from the patchbay path so signal
+        flows around it (dry passthrough), and the plugin is deactivated
+        (``set_active(False)``) to save CPU. Bypass OFF re-inserts the
+        plugin into the patchbay path and reactivates it.
 
-        Parameters
-        ----------
-        node_name:
-            Name of the target track or bus node.
-        role_or_handle:
-            The effect's role or stable handle.
-        on:
-            True to bypass the effect; False to un-bypass it.
-
-        Returns
-        -------
-        dict
-            ``{"success": True, "node": ..., "role": ..., "bypassed": ...}``
-            on success, or ``{"success": False, "message": ...}`` on failure.
+        Order matters: on un-bypass we activate BEFORE rewiring so the
+        plugin is alive when audio reaches it; on bypass we rewire FIRST
+        so the patchbay no longer routes through the plugin before we
+        deactivate it.
         """
         try:
             node = self._graph.get_node(node_name)
@@ -797,8 +789,17 @@ class RigController:
                     ),
                 }
 
-            await self._remote(node).set_active(effect.plugin_id, not on)
             effect.bypassed = on
+            ordered = [e.plugin_id for e in node.effects if not e.bypassed]
+            remote = self._remote(node)
+
+            if not on:
+                await remote.set_active(effect.plugin_id, True)
+
+            await remote.rewire_chain(ordered)
+
+            if on:
+                await remote.set_active(effect.plugin_id, False)
 
             return {
                 "success": True,

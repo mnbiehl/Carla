@@ -338,6 +338,52 @@ class TestBypass:
 
         assert result["success"] is False
 
+    def test_bypass_on_rewires_chain_skipping_bypassed_effect(self):
+        ctrl, graph, fake = self._setup()
+
+        asyncio.run(ctrl.bypass("strat", "comp", on=True))
+
+        # rewire_chain must be called with [1] — comp (id 0) skipped, eq (id 1) kept
+        assert ("rewire_chain", [1]) in fake.calls
+
+    def test_bypass_off_rewires_chain_restoring_effect(self):
+        ctrl, graph, fake = self._setup()
+        graph.get_node("strat").effects[0].bypassed = True
+
+        asyncio.run(ctrl.bypass("strat", "comp", on=False))
+
+        # Both effects back in: [0, 1]
+        assert ("rewire_chain", [0, 1]) in fake.calls
+
+    def test_bypass_on_rewires_before_deactivating(self):
+        """On bypass: rewire must happen BEFORE set_active(False) so the
+        patchbay no longer routes through the plugin before it's silenced."""
+        ctrl, graph, fake = self._setup()
+
+        asyncio.run(ctrl.bypass("strat", "comp", on=True))
+
+        names = fake.call_names()
+        rewire_idx = names.index("rewire_chain")
+        deactivate_idx = next(
+            i for i, c in enumerate(fake.calls) if c == ("set_active", (0, False))
+        )
+        assert rewire_idx < deactivate_idx
+
+    def test_bypass_off_activates_before_rewiring(self):
+        """On un-bypass: set_active(True) must happen BEFORE rewire so the
+        plugin is alive when audio reaches it."""
+        ctrl, graph, fake = self._setup()
+        graph.get_node("strat").effects[0].bypassed = True
+
+        asyncio.run(ctrl.bypass("strat", "comp", on=False))
+
+        names = fake.call_names()
+        activate_idx = next(
+            i for i, c in enumerate(fake.calls) if c == ("set_active", (0, True))
+        )
+        rewire_idx = names.index("rewire_chain")
+        assert activate_idx < rewire_idx
+
 
 # ---------------------------------------------------------------------------
 # set_param
