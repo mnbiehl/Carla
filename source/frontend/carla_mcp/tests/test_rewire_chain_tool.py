@@ -77,16 +77,26 @@ class TestRewireChainConnectionsDisconnect:
         bridge.patchbay_disconnect.assert_any_call(11)
         assert bridge.patchbay_disconnect.call_count == 2
 
-    def test_empty_plugin_ids_makes_no_connect_calls(self):
+    def test_empty_plugin_ids_wires_dry_passthrough(self):
+        """An empty chain must wire instance-in → instance-out directly so the
+        node passes signal dry instead of going silent (the bypass-all case)."""
         conns = [{"id": 5}]
         bridge = _make_bridge(connections=conns)
 
         result = rewire_chain_connections(bridge, [])
 
-        bridge.patchbay_connect.assert_not_called()
         assert result["success"] is True
-        assert result["connections"] == 0
         assert result["plugin_order"] == []
+        # 2 dry-passthrough connections: L->L, R->R (system in → system out)
+        assert result["connections"] == 2
+        bridge.patchbay_connect.assert_any_call(
+            1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+            2, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0,
+        )
+        bridge.patchbay_connect.assert_any_call(
+            1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+            2, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1,
+        )
 
     def test_no_existing_connections_makes_no_disconnect_calls(self):
         bridge = _make_bridge(connections=[])
@@ -235,7 +245,7 @@ class TestRewireChainTool:
         assert data["success"] is True
         assert data["plugin_order"] == [0, 1]
 
-    def test_tool_with_empty_list_disconnects_only(self):
+    def test_tool_with_empty_list_disconnects_then_wires_dry_passthrough(self):
         conns = [{"id": 99}]
         bridge = _make_bridge(connections=conns)
         tools = _register(bridge)
@@ -244,5 +254,7 @@ class TestRewireChainTool:
         data = json.loads(raw)
 
         assert data["success"] is True
+        assert data["connections"] == 2
         bridge.patchbay_disconnect.assert_called_once_with(99)
-        bridge.patchbay_connect.assert_not_called()
+        # dry passthrough wired instead of leaving the node silent
+        assert bridge.patchbay_connect.call_count == 2

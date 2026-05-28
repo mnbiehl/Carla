@@ -137,6 +137,22 @@ def _make_plugin_to_system_connections(
     return connections
 
 
+def _make_system_to_system_connections(
+    bridge: CarlaBackendBridge,
+) -> List[Tuple[int, int, int, int]]:
+    """Direct dry passthrough: instance input (group 1) → output (group 2).
+
+    Used when a chain has no plugins to wire (e.g. every effect bypassed) so
+    the node still passes audio dry instead of going silent.  Wires the stereo
+    pair L->L, R->R.  Verified live: a -12 dBFS tone into audio-in1 emerges at
+    audio-out1 at -12 dBFS with this wiring.
+    """
+    return [
+        (1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0, 2, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0),
+        (1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1, 2, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1),
+    ]
+
+
 def build_chain(
     bridge: CarlaBackendBridge,
     plugins: List[str],
@@ -241,9 +257,15 @@ def rewire_chain_connections(bridge: CarlaBackendBridge, plugin_ids: List[int]) 
         for conn in bridge.get_patchbay_connections():
             bridge.patchbay_disconnect(conn["id"])
 
-        # Step 2: if no plugins, nothing to wire
+        # Step 2: if no plugins remain (e.g. every effect bypassed), wire the
+        # instance input straight to its output so the node passes signal dry
+        # instead of going silent.
         if not plugin_ids:
-            return {"success": True, "plugin_order": plugin_ids, "connections": 0}
+            count = 0
+            for ga, pa, gb, pb in _make_system_to_system_connections(bridge):
+                bridge.patchbay_connect(ga, pa, gb, pb)
+                count += 1
+            return {"success": True, "plugin_order": plugin_ids, "connections": count}
 
         connection_count = 0
 
