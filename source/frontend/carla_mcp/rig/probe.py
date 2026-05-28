@@ -5,13 +5,18 @@ play a sine into any node's input or output, then capture and
 compute peak / RMS dBFS at any node's input or output.
 
 Uses ``pw-cat`` for both playback and recording.  pw-cat on Pop_OS
-24.04 / PipeWire does NOT have ``--loop`` or ``--duration`` flags.
-We work around this by:
-  - For playback: generating a longer WAV (default 10 s) so the
-    tone runs for a while; if it needs to run indefinitely, the
-    process is just spawned and held — caller invokes ``stop_tone``.
-  - For recording: using ``-n / --sample-count`` to stop after a
-    fixed number of frames (``duration * rate``).
+24.04 / PipeWire does NOT have ``--loop`` or ``--duration`` flags, and
+its ``--target`` flag does NOT honour a ``client:port`` string (it
+auto-connects to the default device).  We work around all three by:
+  - For playback: generating a longer WAV (default 10 s) and spawning
+    pw-cat with autoconnect disabled, then wiring its output stream to
+    the target input port with ``pw-link``; the caller invokes
+    ``stop_tone`` to end it.
+  - For recording: spawning pw-cat with ``-n / --sample-count`` (stop
+    after ``duration * rate`` frames) and autoconnect disabled, then
+    wiring the source port to the capture stream with ``pw-link``.
+    pw-cat ``-r`` exits non-zero even on success, so capture is judged
+    by output-file size, not return code.
 """
 
 from __future__ import annotations
@@ -33,6 +38,12 @@ SAMPLE_RATE = 48000
 TONE_DURATION_S = 10.0  # length of the cached sine WAV
 DB_FLOOR = -120.0
 FULLSCALE_S16 = 32768.0
+
+# pw-cat --target <client:port> does NOT honour the port — it auto-connects to
+# the default sink/source.  Instead we disable autoconnect and wire the stream
+# explicitly with pw-link.  (Verified live on PipeWire / Pop_OS 24.04.)
+AUTOCONNECT_OFF = "{ node.autoconnect=false }"
+WAV_HEADER_BYTES = 44  # a valid PCM WAV is larger than this once it has frames
 
 
 def _db_to_amp(db: float) -> float:
@@ -118,12 +129,17 @@ class RigProbe:
         cache_dir: Optional[Path] = None,
         subprocess_runner=subprocess,
         wav_analyzer: Callable[[Path], Dict[str, float]] = analyze_wav,
+        pwcat_port_finder: Optional[Callable[[str], str]] = None,
+        port_linker: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self._controller = controller
         self._cache_dir = Path(cache_dir) if cache_dir else Path("/tmp/carla_rig_probe")
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._sp = subprocess_runner
         self._analyze = wav_analyzer
+        # Injectable so tests need not parse real pw-link output.
+        self._find_pwcat_port = pwcat_port_finder or self._default_find_pwcat_port
+        self._link_ports = port_linker or self._default_link_ports
         self._tone_procs: Dict[str, "subprocess.Popen"] = {}
 
     # -- port resolution -------------------------------------------------
@@ -187,21 +203,31 @@ class RigProbe:
         cmd = [
             "pw-cat",
             "-p",
-            "--target",
-            port,
             "--channels",
             "1",
             "--rate",
             str(SAMPLE_RATE),
+            "-P",
+            AUTOCONNECT_OFF,
             str(wav),
         ]
         proc = self._sp.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self._tone_procs[node] = proc
 
-        # Tiny yield so the spawned proc gets a chance to connect.
-        await asyncio.sleep(0)
+        # Wire the playback stream's output explicitly to the target input port.
+        src = await self._await_pwcat_port("output")
+        linked = bool(src)
+        if src:
+            self._link_ports(src, port)
 
-        return {"success": True, "node": node, "port": port, "hz": hz, "db": db}
+        return {
+            "success": True,
+            "node": node,
+            "port": port,
+            "hz": hz,
+            "db": db,
+            "linked": linked,
+        }
 
     def stop_tone(self, node: str) -> dict:
         """Terminate the tone playing on *node*, if any."""
@@ -239,8 +265,6 @@ class RigProbe:
         cmd = [
             "pw-cat",
             "-r",
-            "--target",
-            port,
             "--channels",
             "1",
             "--rate",
@@ -249,22 +273,25 @@ class RigProbe:
             "s16",
             "-n",
             str(n_samples),
+            "-P",
+            AUTOCONNECT_OFF,
             str(out_path),
         ]
-        # Run sync — pw-cat exits once -n samples are captured.
+        # Spawn (not run) so we can wire the capture stream to the source port
+        # after pw-cat creates it, then wait for it to capture -n samples.
+        proc = self._sp.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dst = await self._await_pwcat_port("input")
+        if dst:
+            self._link_ports(port, dst)
         try:
-            self._sp.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=duration + 5.0,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return {"success": False, "reason": "pw-cat capture timed out"}
+            proc.wait(timeout=duration + 5.0)
+        except Exception:
+            self._terminate(proc)
 
-        if not out_path.exists():
-            return {"success": False, "reason": "pw-cat produced no output file"}
+        # pw-cat -r exits with code 1 even on a successful finite capture, so
+        # gate on the output file having real frames rather than on returncode.
+        if not out_path.exists() or out_path.stat().st_size <= WAV_HEADER_BYTES:
+            return {"success": False, "reason": "no output file"}
 
         levels = self._analyze(out_path)
         return {
@@ -277,6 +304,40 @@ class RigProbe:
         }
 
     # -- helpers ---------------------------------------------------------
+
+    async def _await_pwcat_port(self, kind: str, attempts: int = 30, delay: float = 0.05) -> str:
+        """Poll until a ``pw-cat`` stream port of *kind* appears, or give up.
+
+        *kind* is ``"output"`` (playback stream) or ``"input"`` (capture stream).
+        Returns the port string (e.g. ``pw-cat:output_MONO``) or ``""``.
+        """
+        for _ in range(attempts):
+            p = self._find_pwcat_port(kind)
+            if p:
+                return p
+            await asyncio.sleep(delay)
+        return ""
+
+    def _default_find_pwcat_port(self, kind: str) -> str:
+        """Return the first ``pw-cat`` port of *kind* via ``pw-link -o``/``-i``."""
+        flag = "-o" if kind == "output" else "-i"
+        try:
+            result = self._sp.run(["pw-link", flag], capture_output=True, text=True)
+            out = result.stdout or ""
+        except Exception:
+            return ""
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("pw-cat:") and kind in s:
+                return s
+        return ""
+
+    def _default_link_ports(self, src: str, dst: str) -> None:
+        """Best-effort ``pw-link src dst`` (output port → input port)."""
+        try:
+            self._sp.run(["pw-link", src, dst], capture_output=True, text=True)
+        except Exception:
+            pass
 
     def _terminate(self, proc) -> None:
         """Best-effort terminate + wait on a Popen."""

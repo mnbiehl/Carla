@@ -46,14 +46,23 @@ def _make_controller_with_node(name: str = "strat"):
     return controller
 
 
-def _make_probe(tmp_path: Path, controller=None, sp=None, analyzer=None) -> RigProbe:
+def _make_probe(tmp_path: Path, controller=None, sp=None, analyzer=None,
+                port_finder=None, linker=None) -> RigProbe:
     controller = controller or _make_controller_with_node()
     sp = sp or MagicMock(Popen=MagicMock(), run=MagicMock())
+    # By default, resolve pw-cat stream ports instantly without touching
+    # real pw-link, and record link calls on the provided/created mock.
+    if port_finder is None:
+        port_finder = lambda kind: f"pw-cat:{kind}_MONO"
+    if linker is None:
+        linker = MagicMock()
     return RigProbe(
         controller,
         cache_dir=tmp_path,
         subprocess_runner=sp,
         wav_analyzer=analyzer or analyze_wav,
+        pwcat_port_finder=port_finder,
+        port_linker=linker,
     )
 
 
@@ -122,7 +131,8 @@ class TestPlayTone:
     async def test_resolves_input_port_and_spawns_pw_cat(self, tmp_path):
         controller = _make_controller_with_node("strat")
         sp = MagicMock()
-        probe = _make_probe(tmp_path, controller=controller, sp=sp)
+        linker = MagicMock()
+        probe = _make_probe(tmp_path, controller=controller, sp=sp, linker=linker)
 
         result = await probe.play_tone("strat", hz=440.0, db=-12.0, at="input")
 
@@ -132,14 +142,19 @@ class TestPlayTone:
             "port": "CarlaChain_strat:audio-in1",
             "hz": 440.0,
             "db": -12.0,
+            "linked": True,
         }
         controller._sink_ports.assert_called_once()
         sp.Popen.assert_called_once()
         cmd = sp.Popen.call_args.args[0]
         assert cmd[0] == "pw-cat"
         assert "-p" in cmd
-        assert "--target" in cmd
-        assert "CarlaChain_strat:audio-in1" in cmd
+        # autoconnect disabled, no --target (which pw-cat ignores for ports)
+        assert "--target" not in cmd
+        assert "-P" in cmd
+        assert cmd[cmd.index("-P") + 1] == "{ node.autoconnect=false }"
+        # playback stream output wired explicitly to the target input port
+        linker.assert_called_once_with("pw-cat:output_MONO", "CarlaChain_strat:audio-in1")
 
     @pytest.mark.asyncio
     async def test_uses_source_ports_when_at_is_output(self, tmp_path):
@@ -238,16 +253,20 @@ class TestMeasureLevel:
     async def test_invokes_pw_cat_record_and_returns_db(self, tmp_path):
         controller = _make_controller_with_node("strat")
         sp = MagicMock()
+        linker = MagicMock()
 
-        # When pw-cat "runs," write a constant-amp WAV at -6 dB to the
-        # expected capture path so the analyzer reads it.
-        def fake_run(cmd, **kwargs):
+        # When pw-cat is spawned, write a constant-amp WAV at -6 dB to the
+        # expected capture path so the analyzer reads it; return a proc whose
+        # wait() mimics pw-cat -r exiting non-zero even on success.
+        def fake_popen(cmd, **kwargs):
             out_path = Path(cmd[-1])
             _write_constant_amp_wav(out_path, db=-6.0, duration_s=0.5)
-            return MagicMock(returncode=0)
+            proc = MagicMock()
+            proc.wait.return_value = 1
+            return proc
 
-        sp.run.side_effect = fake_run
-        probe = _make_probe(tmp_path, controller=controller, sp=sp)
+        sp.Popen.side_effect = fake_popen
+        probe = _make_probe(tmp_path, controller=controller, sp=sp, linker=linker)
 
         result = await probe.measure_level("strat", at="output", duration=0.5)
 
@@ -257,29 +276,35 @@ class TestMeasureLevel:
         assert result["duration_s"] == 0.5
         assert abs(result["peak_db"] - (-6.0)) < 0.5
         assert abs(result["rms_db"] - (-6.0)) < 0.5
-        cmd = sp.run.call_args.args[0]
+        cmd = sp.Popen.call_args.args[0]
         assert cmd[0] == "pw-cat"
         assert "-r" in cmd
+        assert "--target" not in cmd
+        assert "-P" in cmd
         # -n sample-count == duration * rate
         assert "-n" in cmd
         n_idx = cmd.index("-n")
         assert cmd[n_idx + 1] == str(int(0.5 * SAMPLE_RATE))
+        # capture stream wired from the source port (out) → pw-cat input
+        linker.assert_called_once_with("CarlaChain_strat:audio-out1", "pw-cat:input_MONO")
 
     @pytest.mark.asyncio
     async def test_silent_capture_reports_floor(self, tmp_path):
         controller = _make_controller_with_node("strat")
         sp = MagicMock()
 
-        def fake_run(cmd, **kwargs):
+        def fake_popen(cmd, **kwargs):
             out_path = Path(cmd[-1])
             with wave.open(str(out_path), "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.int16).tobytes())
-            return MagicMock(returncode=0)
+            proc = MagicMock()
+            proc.wait.return_value = 1
+            return proc
 
-        sp.run.side_effect = fake_run
+        sp.Popen.side_effect = fake_popen
         probe = _make_probe(tmp_path, controller=controller, sp=sp)
 
         result = await probe.measure_level("strat", at="output", duration=0.5)
@@ -296,7 +321,8 @@ class TestMeasureLevel:
     async def test_pw_cat_failure_to_produce_file_returns_error(self, tmp_path):
         controller = _make_controller_with_node("strat")
         sp = MagicMock()
-        sp.run.return_value = MagicMock(returncode=1)  # no file written
+        # Popen spawns but no file is ever written (capture failed).
+        sp.Popen.return_value = MagicMock(wait=MagicMock(return_value=1))
         probe = _make_probe(tmp_path, controller=controller, sp=sp)
 
         result = await probe.measure_level("strat", at="output", duration=0.1)
