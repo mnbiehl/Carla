@@ -10,14 +10,19 @@ and ``FastMCP`` server.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
     from carla_mcp.rig.controller import RigController
+    from carla_mcp.rig.probe import RigProbe
 
 
-def register_rig_tools(mcp: "FastMCP", controller: "RigController") -> None:
+def register_rig_tools(
+    mcp: "FastMCP",
+    controller: "RigController",
+    probe: Optional["RigProbe"] = None,
+) -> None:
     """Register all rig-layer MCP tools on *mcp*.
 
     Parameters
@@ -26,6 +31,11 @@ def register_rig_tools(mcp: "FastMCP", controller: "RigController") -> None:
         The :class:`FastMCP` server instance to register tools on.
     controller:
         The :class:`RigController` instance whose methods back each tool.
+    probe:
+        Optional :class:`RigProbe` for test-tone playback + level
+        measurement.  When provided, three additional tools are
+        registered: ``carla_play_tone``, ``carla_stop_tone``,
+        ``carla_measure_level``.
     """
 
     @mcp.tool()
@@ -258,3 +268,67 @@ def register_rig_tools(mcp: "FastMCP", controller: "RigController") -> None:
             query=query if query else None,
             category=category if category else None,
         )
+
+    # ----- Probe tools (optional) -----------------------------------------
+    if probe is None:
+        return
+
+    @mcp.tool()
+    async def play_tone(
+        node: str,
+        hz: float = 440.0,
+        db: float = -12.0,
+        at: str = "input",
+    ) -> dict:
+        """Play a mono sine tone into *node*'s input or output port.
+
+        Use to validate signal flow without human ears.  Pair with
+        :func:`measure_level` at another node to check whether signal
+        actually passes through the chain.
+
+        Parameters
+        ----------
+        node:
+            Name of the target node in the rig graph.
+        hz:
+            Tone frequency in Hz (default 440).
+        db:
+            Tone peak amplitude in dBFS (default -12).
+        at:
+            ``"input"`` (default) or ``"output"`` — which side of the
+            node to inject the tone at.
+        """
+        return await probe.play_tone(node, hz=hz, db=db, at=at)
+
+    @mcp.tool()
+    def stop_tone(node: str) -> dict:
+        """Stop any test tone currently playing on *node*.
+
+        Parameters
+        ----------
+        node:
+            Name of the node whose tone should be stopped.
+        """
+        return probe.stop_tone(node)
+
+    @mcp.tool()
+    async def measure_level(
+        node: str,
+        at: str = "output",
+        duration: float = 0.5,
+    ) -> dict:
+        """Capture *node*'s input or output for *duration* s and report dBFS.
+
+        Returns peak and RMS levels in dBFS (floored at -120).  Pair
+        with :func:`play_tone` to verify signal flow.
+
+        Parameters
+        ----------
+        node:
+            Name of the node to measure.
+        at:
+            ``"output"`` (default) or ``"input"``.
+        duration:
+            Capture duration in seconds (default 0.5).
+        """
+        return await probe.measure_level(node, at=at, duration=duration)

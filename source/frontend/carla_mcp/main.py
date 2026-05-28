@@ -316,6 +316,7 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
         # Create rig graph and controller, then register rig tools
         from .rig.graph import RigGraph
         from .rig import RigController, register_rig_tools
+        from .rig.probe import RigProbe
 
         global rig_graph, rig_controller
         rig_graph = RigGraph()
@@ -325,8 +326,9 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
             chain_launcher,
             jack_router,
         )
-        register_rig_tools(mcp_server, rig_controller)
-        logger.info("Rig tools registered")
+        rig_probe = RigProbe(rig_controller)
+        register_rig_tools(mcp_server, rig_controller, probe=rig_probe)
+        logger.info("Rig tools registered (with probe)")
 
         # Register custom endpoints including SSE monitoring
         register_custom_endpoints()

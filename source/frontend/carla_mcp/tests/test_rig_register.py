@@ -181,3 +181,62 @@ class TestAsyncToolForwarding:
         result = asyncio.run(coro)
         controller.bypass.assert_called_once_with("strat", "comp", True)
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Probe tools (optional)
+# ---------------------------------------------------------------------------
+
+
+PROBE_TOOLS = {"play_tone", "stop_tone", "measure_level"}
+
+
+def _make_mcp_with_probe():
+    mcp = FastMCP("test")
+    controller = MagicMock()
+    controller._graph = RigGraph()
+    probe = MagicMock()
+    probe.play_tone = AsyncMock(return_value={"success": True})
+    probe.measure_level = AsyncMock(return_value={"success": True})
+    register_rig_tools(mcp, controller, probe=probe)
+    return mcp, controller, probe
+
+
+class TestProbeRegistration:
+    def test_probe_omitted_means_only_14_tools(self):
+        mcp = FastMCP("test")
+        controller = MagicMock()
+        controller._graph = RigGraph()
+        register_rig_tools(mcp, controller)
+        assert len(mcp._tool_manager._tools) == 14
+        assert PROBE_TOOLS.isdisjoint(mcp._tool_manager._tools.keys())
+
+    def test_probe_adds_three_tools(self):
+        mcp, _, _ = _make_mcp_with_probe()
+        registered = set(mcp._tool_manager._tools.keys())
+        assert EXPECTED_TOOLS | PROBE_TOOLS == registered
+        assert len(registered) == 17
+
+    def test_play_tone_forwards_to_probe(self):
+        mcp, _, probe = _make_mcp_with_probe()
+        tools = mcp._tool_manager._tools
+        coro = tools["play_tone"].fn(node="strat", hz=440.0, db=-12.0, at="input")
+        result = asyncio.run(coro)
+        probe.play_tone.assert_called_once_with("strat", hz=440.0, db=-12.0, at="input")
+        assert result["success"] is True
+
+    def test_stop_tone_forwards_to_probe(self):
+        mcp, _, probe = _make_mcp_with_probe()
+        probe.stop_tone.return_value = {"success": True}
+        tools = mcp._tool_manager._tools
+        result = tools["stop_tone"].fn(node="strat")
+        probe.stop_tone.assert_called_once_with("strat")
+        assert result["success"] is True
+
+    def test_measure_level_forwards_to_probe(self):
+        mcp, _, probe = _make_mcp_with_probe()
+        tools = mcp._tool_manager._tools
+        coro = tools["measure_level"].fn(node="strat", at="output", duration=0.5)
+        result = asyncio.run(coro)
+        probe.measure_level.assert_called_once_with("strat", at="output", duration=0.5)
+        assert result["success"] is True
