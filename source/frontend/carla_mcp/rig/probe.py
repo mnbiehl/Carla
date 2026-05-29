@@ -8,10 +8,12 @@ Uses ``pw-cat`` for both playback and recording.  pw-cat on Pop_OS
 24.04 / PipeWire does NOT have ``--loop`` or ``--duration`` flags, and
 its ``--target`` flag does NOT honour a ``client:port`` string (it
 auto-connects to the default device).  We work around all three by:
-  - For playback: generating a longer WAV (default 10 s) and spawning
-    pw-cat with autoconnect disabled, then wiring its output stream to
-    the target input port with ``pw-link``; the caller invokes
-    ``stop_tone`` to end it.
+  - For playback: ``play_tone`` is a true on/off toggle.  It spawns one
+    persistent ``pw-cat -p --raw -`` node (autoconnect disabled) and a
+    background thread that streams a seamless sine into its stdin
+    forever, so the tone holds — and its ``pw-link`` stays valid —
+    until ``stop_tone`` tears the node down.  (A finite WAV would lapse
+    mid-session given the gaps between agent calls.)
   - For recording: spawning pw-cat with ``-n / --sample-count`` (stop
     after ``duration * rate`` frames) and autoconnect disabled, then
     wiring the source port to the capture stream with ``pw-link``.
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import math
 import subprocess
+import threading
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Optional
@@ -86,6 +89,24 @@ def generate_sine_wav(
     return path
 
 
+def sine_chunk_bytes(hz: float, db: float, rate: int = SAMPLE_RATE, seconds: int = 1) -> bytes:
+    """Return ``seconds`` of mono little-endian s16 sine as raw PCM bytes.
+
+    A whole-second buffer tiles seamlessly for integer ``hz`` (a whole
+    number of cycles), so it can be streamed in a loop for a continuous
+    tone with no audible boundary click.
+    """
+    n = int(seconds * rate)
+    t = np.arange(n, dtype=np.float64) / rate
+    amp = _db_to_amp(db)
+    pcm = np.clip(
+        np.sin(2.0 * math.pi * hz * t) * amp * FULLSCALE_S16,
+        -FULLSCALE_S16,
+        FULLSCALE_S16 - 1,
+    ).astype("<i2")
+    return pcm.tobytes()
+
+
 def analyze_wav(path: Path) -> Dict[str, float]:
     """Read a 16-bit PCM mono WAV and return peak + RMS dBFS."""
     with wave.open(str(path), "rb") as wf:
@@ -131,6 +152,7 @@ class RigProbe:
         wav_analyzer: Callable[[Path], Dict[str, float]] = analyze_wav,
         pwcat_port_finder: Optional[Callable[[str], str]] = None,
         port_linker: Optional[Callable[[str, str], None]] = None,
+        tone_streamer: Optional[Callable[["subprocess.Popen", float, float], Callable[[], None]]] = None,
     ) -> None:
         self._controller = controller
         self._cache_dir = Path(cache_dir) if cache_dir else Path("/tmp/carla_rig_probe")
@@ -140,7 +162,11 @@ class RigProbe:
         # Injectable so tests need not parse real pw-link output.
         self._find_pwcat_port = pwcat_port_finder or self._default_find_pwcat_port
         self._link_ports = port_linker or self._default_link_ports
+        # Starts the stdin sine feeder for a spawned pw-cat node; returns a
+        # stop callable.  Injectable so tests need not spin a real thread.
+        self._stream_tone = tone_streamer or self._default_stream_tone
         self._tone_procs: Dict[str, "subprocess.Popen"] = {}
+        self._tone_stops: Dict[str, Callable[[], None]] = {}
 
     # -- port resolution -------------------------------------------------
 
@@ -162,17 +188,6 @@ class RigProbe:
         )
         return ports[0] if ports else ""
 
-    # -- tone cache ------------------------------------------------------
-
-    def _tone_path(self, hz: float, db: float) -> Path:
-        return self._cache_dir / f"sine_{hz:g}hz_{db:g}db.wav"
-
-    def _ensure_tone(self, hz: float, db: float) -> Path:
-        path = self._tone_path(hz, db)
-        if not path.exists():
-            generate_sine_wav(path, hz, db)
-        return path
-
     # -- public API ------------------------------------------------------
 
     async def play_tone(
@@ -182,10 +197,11 @@ class RigProbe:
         db: float = -12.0,
         at: str = "input",
     ) -> dict:
-        """Play a mono sine into *node*'s input or output port.
+        """Play a continuous mono sine into *node*'s input or output port.
 
-        If a tone is already running on this node, terminates it first.
-        Returns ``{"success": True, "node", "port", "hz", "db"}``.
+        The tone holds until :meth:`stop_tone` (an on/off toggle).  If a
+        tone is already running on this node, terminates it first.
+        Returns ``{"success": True, "node", "port", "hz", "db", "linked"}``.
         """
         try:
             port = self._resolve_port(node, at)
@@ -194,25 +210,34 @@ class RigProbe:
         if not port:
             return {"success": False, "reason": f"no {at} ports resolved for {node!r}"}
 
-        wav = self._ensure_tone(hz, db)
-
         # Replace any in-flight tone on this node.
         if node in self._tone_procs:
-            self._terminate(self._tone_procs.pop(node))
+            self._stop_node(node)
 
+        # One persistent pw-cat node reading raw s16 from stdin; a feeder
+        # thread streams the sine into it so the tone never lapses.
         cmd = [
             "pw-cat",
             "-p",
-            "--channels",
-            "1",
+            "--raw",
+            "--format",
+            "s16",
             "--rate",
             str(SAMPLE_RATE),
+            "--channels",
+            "1",
             "-P",
             AUTOCONNECT_OFF,
-            str(wav),
+            "-",
         ]
-        proc = self._sp.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = self._sp.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         self._tone_procs[node] = proc
+        self._tone_stops[node] = self._stream_tone(proc, hz, db)
 
         # Wire the playback stream's output explicitly to the target input port.
         src = await self._await_pwcat_port("output")
@@ -231,20 +256,30 @@ class RigProbe:
 
     def stop_tone(self, node: str) -> dict:
         """Terminate the tone playing on *node*, if any."""
-        proc = self._tone_procs.pop(node, None)
-        if proc is None:
+        if node not in self._tone_procs:
             return {"success": False, "reason": "no tone playing"}
-        self._terminate(proc)
+        self._stop_node(node)
         return {"success": True, "node": node}
 
     def stop_all_tones(self) -> dict:
         """Terminate every tracked tone process.  Returns count stopped."""
         count = 0
-        for node, proc in list(self._tone_procs.items()):
-            self._terminate(proc)
-            del self._tone_procs[node]
+        for node in list(self._tone_procs.keys()):
+            self._stop_node(node)
             count += 1
         return {"success": True, "stopped": count}
+
+    def _stop_node(self, node: str) -> None:
+        """Stop the feeder thread (if any) and terminate the pw-cat node."""
+        stop = self._tone_stops.pop(node, None)
+        if stop is not None:
+            try:
+                stop()
+            except Exception:
+                pass
+        proc = self._tone_procs.pop(node, None)
+        if proc is not None:
+            self._terminate(proc)
 
     async def measure_level(
         self,
@@ -338,6 +373,35 @@ class RigProbe:
             self._sp.run(["pw-link", src, dst], capture_output=True, text=True)
         except Exception:
             pass
+
+    def _default_stream_tone(self, proc, hz: float, db: float) -> Callable[[], None]:
+        """Stream a seamless sine into *proc*'s stdin until stopped.
+
+        Returns a callable that ends the stream (the write blocks at the
+        real-time rate pw-cat consumes, so this also paces playback).
+        """
+        chunk = sine_chunk_bytes(hz, db)
+        stop_evt = threading.Event()
+
+        def feed() -> None:
+            try:
+                while not stop_evt.is_set():
+                    proc.stdin.write(chunk)
+                    proc.stdin.flush()
+            except (BrokenPipeError, ValueError, OSError):
+                pass
+
+        threading.Thread(target=feed, daemon=True).start()
+
+        def stop() -> None:
+            stop_evt.set()
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+
+        return stop
 
     def _terminate(self, proc) -> None:
         """Best-effort terminate + wait on a Popen."""

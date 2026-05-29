@@ -23,6 +23,7 @@ from carla_mcp.rig.probe import (
     RigProbe,
     analyze_wav,
     generate_sine_wav,
+    sine_chunk_bytes,
 )
 
 
@@ -47,7 +48,7 @@ def _make_controller_with_node(name: str = "strat"):
 
 
 def _make_probe(tmp_path: Path, controller=None, sp=None, analyzer=None,
-                port_finder=None, linker=None) -> RigProbe:
+                port_finder=None, linker=None, streamer=None) -> RigProbe:
     controller = controller or _make_controller_with_node()
     sp = sp or MagicMock(Popen=MagicMock(), run=MagicMock())
     # By default, resolve pw-cat stream ports instantly without touching
@@ -56,6 +57,10 @@ def _make_probe(tmp_path: Path, controller=None, sp=None, analyzer=None,
         port_finder = lambda kind: f"pw-cat:{kind}_MONO"
     if linker is None:
         linker = MagicMock()
+    # No-op streamer by default so play_tone doesn't spin a real feeder
+    # thread; returns a stop callable (also a mock).
+    if streamer is None:
+        streamer = MagicMock(return_value=MagicMock())
     return RigProbe(
         controller,
         cache_dir=tmp_path,
@@ -63,6 +68,7 @@ def _make_probe(tmp_path: Path, controller=None, sp=None, analyzer=None,
         wav_analyzer=analyzer or analyze_wav,
         pwcat_port_finder=port_finder,
         port_linker=linker,
+        tone_streamer=streamer,
     )
 
 
@@ -149,6 +155,10 @@ class TestPlayTone:
         cmd = sp.Popen.call_args.args[0]
         assert cmd[0] == "pw-cat"
         assert "-p" in cmd
+        # continuous tone: raw s16 streamed from stdin (last arg "-")
+        assert "--raw" in cmd
+        assert cmd[-1] == "-"
+        assert sp.Popen.call_args.kwargs["stdin"] is subprocess.PIPE
         # autoconnect disabled, no --target (which pw-cat ignores for ports)
         assert "--target" not in cmd
         assert "-P" in cmd
@@ -241,6 +251,46 @@ class TestStopTone:
         p1.terminate.assert_called_once()
         p2.terminate.assert_called_once()
         assert probe._tone_procs == {}
+
+
+class TestContinuousToggle:
+    """play_tone is an on/off toggle backed by a streaming feeder."""
+
+    def test_sine_chunk_bytes_length_and_amplitude(self):
+        raw = sine_chunk_bytes(440.0, -6.0, rate=SAMPLE_RATE, seconds=1)
+        samples = np.frombuffer(raw, dtype="<i2")
+        assert samples.size == SAMPLE_RATE  # one whole second
+        peak = float(np.max(np.abs(samples))) / FULLSCALE_S16
+        assert abs(20.0 * math.log10(peak) - (-6.0)) < 0.5
+
+    @pytest.mark.asyncio
+    async def test_play_starts_streamer_and_stop_invokes_it(self, tmp_path):
+        sp = MagicMock()
+        proc = MagicMock()
+        sp.Popen.return_value = proc
+        stop_cb = MagicMock()
+        streamer = MagicMock(return_value=stop_cb)
+        probe = _make_probe(tmp_path, sp=sp, streamer=streamer)
+
+        await probe.play_tone("strat", hz=440.0, db=-12.0, at="input")
+        streamer.assert_called_once_with(proc, 440.0, -12.0)
+
+        probe.stop_tone("strat")
+        stop_cb.assert_called_once()
+        assert "strat" not in probe._tone_stops
+
+    @pytest.mark.asyncio
+    async def test_second_play_stops_first_streamer(self, tmp_path):
+        sp = MagicMock()
+        sp.Popen.side_effect = [MagicMock(), MagicMock()]
+        stop1, stop2 = MagicMock(), MagicMock()
+        streamer = MagicMock(side_effect=[stop1, stop2])
+        probe = _make_probe(tmp_path, sp=sp, streamer=streamer)
+
+        await probe.play_tone("strat", at="input")
+        await probe.play_tone("strat", at="input")
+
+        stop1.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
