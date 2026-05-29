@@ -339,6 +339,42 @@ class TestMeasureLevel:
         linker.assert_called_once_with("CarlaChain_strat:audio-out1", "pw-cat:input_MONO")
 
     @pytest.mark.asyncio
+    async def test_measure_level_does_not_block_event_loop(self, tmp_path):
+        # A slow (blocking) proc.wait must run off-loop so other coroutines
+        # keep progressing.  If it blocked the loop, the ticker below could
+        # not advance while the capture "runs".
+        import asyncio
+        import time as _time
+
+        controller = _make_controller_with_node("strat")
+        sp = MagicMock()
+
+        def fake_popen(cmd, **kwargs):
+            out_path = Path(cmd[-1])
+            _write_constant_amp_wav(out_path, db=-6.0, duration_s=0.1)
+            proc = MagicMock()
+            proc.wait.side_effect = lambda timeout=None: _time.sleep(0.2)
+            return proc
+
+        sp.Popen.side_effect = fake_popen
+        probe = _make_probe(tmp_path, controller=controller, sp=sp)
+
+        progressed = []
+
+        async def ticker():
+            for _ in range(20):
+                progressed.append(1)
+                await asyncio.sleep(0.01)
+
+        measure = asyncio.create_task(probe.measure_level("strat", at="output", duration=0.1))
+        tick = asyncio.create_task(ticker())
+        await measure
+        progress_during_measure = len(progressed)
+        await tick
+
+        assert progress_during_measure >= 3  # loop kept running during the wait
+
+    @pytest.mark.asyncio
     async def test_silent_capture_reports_floor(self, tmp_path):
         controller = _make_controller_with_node("strat")
         sp = MagicMock()

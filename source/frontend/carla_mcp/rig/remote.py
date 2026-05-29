@@ -9,12 +9,26 @@ sse_client/ClientSession pattern as tool_proxy._forward_tool_call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Callable, Awaitable
 
 from mcp.client.sse import sse_client
 from mcp import ClientSession
 from mcp.types import TextContent
+
+# Default per-call deadline for an SSE round-trip to a child instance.
+DEFAULT_CALL_TIMEOUT_S = 10.0
+
+
+class RemoteError(RuntimeError):
+    """A call to a child Carla instance failed at the transport layer.
+
+    Raised (rather than returning a string) so callers can tell a genuine
+    comms failure apart from an empty/valid result — otherwise a transient
+    blip would JSON-parse to ``{}`` and look like "child has no plugins",
+    silently driving a chain rewire to dry passthrough.
+    """
 
 
 class RemoteInstance:
@@ -29,30 +43,39 @@ class RemoteInstance:
         self._call_tool = call_tool
 
     @classmethod
-    def over_sse(cls, sse_url: str) -> "RemoteInstance":
+    def over_sse(cls, sse_url: str, timeout: float = DEFAULT_CALL_TIMEOUT_S) -> "RemoteInstance":
         """Build a RemoteInstance that connects to *sse_url* for each call.
 
         Uses one SSE connection per call (matches tool_proxy pattern).
+        Each call is bounded by *timeout*; a transport failure or timeout
+        raises :class:`RemoteError` rather than returning an error string,
+        so callers don't mistake a comms failure for an empty result.
 
         Args:
             sse_url: Full SSE endpoint, e.g. "http://127.0.0.1:8090/sse"
+            timeout: Per-call deadline in seconds.
         """
+
+        async def _invoke(tool_name: str, args: dict) -> str:
+            async with sse_client(sse_url) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, args)
+                    parts = []
+                    for content in result.content:
+                        if isinstance(content, TextContent):
+                            parts.append(content.text)
+                        else:
+                            parts.append(str(content))
+                    return "\n".join(parts) if parts else "OK"
 
         async def _call(tool_name: str, args: dict) -> str:
             try:
-                async with sse_client(sse_url) as (read_stream, write_stream):
-                    async with ClientSession(read_stream, write_stream) as session:
-                        await session.initialize()
-                        result = await session.call_tool(tool_name, args)
-                        parts = []
-                        for content in result.content:
-                            if isinstance(content, TextContent):
-                                parts.append(content.text)
-                            else:
-                                parts.append(str(content))
-                        return "\n".join(parts) if parts else "OK"
+                return await asyncio.wait_for(_invoke(tool_name, args), timeout=timeout)
             except Exception as e:
-                return f"Error calling '{tool_name}': {e}"
+                raise RemoteError(
+                    f"remote call '{tool_name}' to {sse_url} failed: {e}"
+                ) from e
 
         return cls(_call)
 

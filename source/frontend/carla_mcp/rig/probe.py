@@ -318,10 +318,12 @@ class RigProbe:
         dst = await self._await_pwcat_port("input")
         if dst:
             self._link_ports(port, dst)
+        # Offload the blocking wait so the asyncio event loop (and all child
+        # SSE traffic) keeps running during the capture window.
         try:
-            proc.wait(timeout=duration + 5.0)
+            await asyncio.to_thread(proc.wait, timeout=duration + 5.0)
         except Exception:
-            self._terminate(proc)
+            await asyncio.to_thread(self._terminate, proc)
 
         # pw-cat -r exits with code 1 even on a successful finite capture, so
         # gate on the output file having real frames rather than on returncode.

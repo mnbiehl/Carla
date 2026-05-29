@@ -3,7 +3,7 @@
 import asyncio
 import json
 import pytest
-from carla_mcp.rig.remote import RemoteInstance
+from carla_mcp.rig.remote import RemoteInstance, RemoteError
 
 
 # ---------------------------------------------------------------------------
@@ -179,3 +179,53 @@ def test_resolve_handle_makes_exactly_one_call():
 
     assert len(fake.calls) == 1
     assert fake.calls[0][0] == "list_plugin_handles"
+
+
+# ---------------------------------------------------------------------------
+# Transport errors (M5): a comms failure must raise, not look like empty data
+
+
+def test_list_handles_propagates_remote_error():
+    async def boom(tool_name, args):
+        raise RemoteError("transport down")
+
+    remote = RemoteInstance(boom)
+    with pytest.raises(RemoteError):
+        asyncio.run(remote.list_handles())
+
+
+def test_get_parameters_propagates_remote_error():
+    async def boom(tool_name, args):
+        raise RemoteError("transport down")
+
+    remote = RemoteInstance(boom)
+    with pytest.raises(RemoteError):
+        asyncio.run(remote.get_parameters(0))
+
+
+def test_over_sse_raises_remote_error_on_transport_failure(monkeypatch):
+    import carla_mcp.rig.remote as remote_mod
+
+    def boom(url):
+        raise ConnectionError("no route to host")
+
+    monkeypatch.setattr(remote_mod, "sse_client", boom)
+    remote = RemoteInstance.over_sse("http://127.0.0.1:9999/sse")
+    with pytest.raises(RemoteError):
+        asyncio.run(remote.call("anything"))
+
+
+def test_over_sse_times_out_to_remote_error(monkeypatch):
+    import carla_mcp.rig.remote as remote_mod
+
+    class _HangingCM:
+        async def __aenter__(self):
+            await asyncio.sleep(10)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(remote_mod, "sse_client", lambda url: _HangingCM())
+    remote = RemoteInstance.over_sse("http://127.0.0.1:9999/sse", timeout=0.05)
+    with pytest.raises(RemoteError):
+        asyncio.run(remote.call("anything"))
