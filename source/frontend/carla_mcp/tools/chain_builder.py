@@ -253,6 +253,19 @@ def rewire_chain_connections(bridge: CarlaBackendBridge, plugin_ids: List[int]) 
         on success, or ``{"success": False, "error": <message>}`` on exception.
     """
     try:
+        # Resolve every plugin's patchbay group up front. If any is missing
+        # (its patchbay-added callback hasn't fired yet), abort BEFORE the
+        # Step-1 disconnects so we never leave the node silent.
+        groups = {}
+        for pid in plugin_ids:
+            g = bridge._plugin_to_group_map.get(pid)
+            if g is None:
+                return {
+                    "success": False,
+                    "error": f"plugin {pid} has no patchbay group yet; aborting rewire",
+                }
+            groups[pid] = g
+
         # Step 1: disconnect all currently-tracked internal connections
         for conn in bridge.get_patchbay_connections():
             bridge.patchbay_disconnect(conn["id"])
@@ -271,8 +284,7 @@ def rewire_chain_connections(bridge: CarlaBackendBridge, plugin_ids: List[int]) 
 
         # Step 3: wire system input (group 1) → first plugin
         first_id = plugin_ids[0]
-        first_group = bridge._plugin_to_group_map[first_id]
-        for ga, pa, gb, pb in _make_system_to_plugin_connections(bridge, first_id, first_group, 1):
+        for ga, pa, gb, pb in _make_system_to_plugin_connections(bridge, first_id, groups[first_id], 1):
             bridge.patchbay_connect(ga, pa, gb, pb)
             connection_count += 1
 
@@ -280,16 +292,13 @@ def rewire_chain_connections(bridge: CarlaBackendBridge, plugin_ids: List[int]) 
         for i in range(len(plugin_ids) - 1):
             pid_i = plugin_ids[i]
             pid_next = plugin_ids[i + 1]
-            group_i = bridge._plugin_to_group_map[pid_i]
-            group_next = bridge._plugin_to_group_map[pid_next]
-            for ga, pa, gb, pb in _make_connections(bridge, pid_i, group_i, pid_next, group_next):
+            for ga, pa, gb, pb in _make_connections(bridge, pid_i, groups[pid_i], pid_next, groups[pid_next]):
                 bridge.patchbay_connect(ga, pa, gb, pb)
                 connection_count += 1
 
         # Step 5: wire last plugin → system output (group 2)
         last_id = plugin_ids[-1]
-        last_group = bridge._plugin_to_group_map[last_id]
-        for ga, pa, gb, pb in _make_plugin_to_system_connections(bridge, last_id, last_group, 2):
+        for ga, pa, gb, pb in _make_plugin_to_system_connections(bridge, last_id, groups[last_id], 2):
             bridge.patchbay_connect(ga, pa, gb, pb)
             connection_count += 1
 

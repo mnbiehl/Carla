@@ -386,6 +386,28 @@ class TestRouteConnectFailure:
         assert result["success"] is False
         assert "port busy" in result["message"]
 
+    def test_partial_stereo_failure_rolls_back_and_records_no_edge(self):
+        # L connects, R fails: the L connection must be torn back down and
+        # no graph edge recorded (don't leave a half-wired left-only pair).
+        ctrl, graph, router, _ = _make_controller()
+        router.connect.side_effect = [
+            RouteResult(success=True),
+            RouteResult(success=False, message="R port busy"),
+        ]
+        graph.add_node(Node(name="a", kind="track", jack_client="CarlaChain_a"))
+        graph.add_node(Node(name="b", kind="track", jack_client="CarlaChain_b"))
+
+        result = ctrl.route("a", "b")
+
+        assert result["success"] is False
+        assert result["pairs"] == []
+        # the successfully-connected L pair was disconnected on rollback
+        router.disconnect.assert_called_once_with(
+            "CarlaChain_a:audio-out1", "CarlaChain_b:audio-in1"
+        )
+        # no edge recorded
+        assert not any(e.dst == "b" for e in graph.edges_from("a"))
+
 
 # ---------------------------------------------------------------------------
 # unroute

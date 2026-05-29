@@ -226,6 +226,36 @@ class TestAddEffect:
 
         assert result["success"] is False
 
+    def test_add_effect_rolls_back_when_rewire_fails(self):
+        # rewire raises after the plugin is added + graph effect appended:
+        # roll back both so the graph and child don't disagree.
+        ctrl, graph, fake = _make_controller_with_track("strat")
+        fake.set_handles({0: "strat/comp"})
+
+        async def boom(plugin_ids):
+            raise RuntimeError("rewire failed")
+
+        fake.rewire_chain = boom
+
+        result = asyncio.run(ctrl.add_effect("strat", plugin="mcompressor", role="comp"))
+
+        assert result["success"] is False
+        assert graph.get_node("strat").effects == []  # graph rolled back
+        assert ("remove_plugin", 0) in fake.calls  # child plugin removed
+
+    def test_add_effect_rolls_back_on_handle_drift(self):
+        # If the stamped handle doesn't resolve on the child (id drift),
+        # fail and roll back instead of rewiring with a bad id.
+        ctrl, graph, fake = _make_controller_with_track("strat")
+        fake.set_handles({})  # handle never resolves
+
+        result = asyncio.run(ctrl.add_effect("strat", plugin="mcompressor", role="comp"))
+
+        assert result["success"] is False
+        assert "drift" in result["message"]
+        assert graph.get_node("strat").effects == []
+        assert ("remove_plugin", 0) in fake.calls
+
 
 # ---------------------------------------------------------------------------
 # remove_effect

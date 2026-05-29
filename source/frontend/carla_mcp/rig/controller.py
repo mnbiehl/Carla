@@ -227,23 +227,40 @@ class RigController:
             *error_message* is ``None`` on full success or a string describing
             the first failure.
         """
-        n_src, n_dst = len(src_ports), len(dst_ports)
-        if n_src == 2 and n_dst == 2:
-            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[1])]
-        elif n_src == 1 and n_dst == 2:
-            pairs = [(src_ports[0], dst_ports[0]), (src_ports[0], dst_ports[1])]
-        elif n_src == 2 and n_dst == 1:
-            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[0])]
-        else:
-            pairs = [(src_ports[0], dst_ports[0])]
+        pairs = self._make_port_pairs(src_ports, dst_ports)
 
         connected: list[tuple[str, str]] = []
         for s, d in pairs:
             result = self._jack_router.connect(s, d)
             if not result.success:
-                return connected, f"Failed to connect {s} -> {d}: {result.message}"
+                # Roll back the partially-wired pairs so we never leave a
+                # half-connected (e.g. left-only) stereo pair behind.
+                for cs, cd in connected:
+                    self._jack_router.disconnect(cs, cd)
+                return [], f"Failed to connect {s} -> {d}: {result.message}"
             connected.append((s, d))
         return connected, None
+
+    @staticmethod
+    def _make_port_pairs(
+        src_ports: List[str], dst_ports: List[str]
+    ) -> list[tuple[str, str]]:
+        """Pair source→dest ports by mono/stereo rules (see :meth:`route`).
+
+        Shared by :meth:`_connect_port_pairs` and :meth:`unroute` so the
+        pairing can't drift between connect and disconnect.  Returns ``[]``
+        if either side has no ports.
+        """
+        n_src, n_dst = len(src_ports), len(dst_ports)
+        if n_src == 0 or n_dst == 0:
+            return []
+        if n_src == 2 and n_dst == 2:
+            return [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[1])]
+        if n_src == 1 and n_dst == 2:
+            return [(src_ports[0], dst_ports[0]), (src_ports[0], dst_ports[1])]
+        if n_src == 2 and n_dst == 1:
+            return [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[0])]
+        return [(src_ports[0], dst_ports[0])]
 
     # ------------------------------------------------------------------
     # route / unroute
@@ -329,17 +346,7 @@ class RigController:
         dst_ports = self._sink_ports(dst_node)
 
         # Build pairs using the same pairing logic as route.
-        n_src, n_dst = len(src_ports), len(dst_ports)
-        if n_src == 2 and n_dst == 2:
-            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[1])]
-        elif n_src == 1 and n_dst == 2:
-            pairs = [(src_ports[0], dst_ports[0]), (src_ports[0], dst_ports[1])]
-        elif n_src == 2 and n_dst == 1:
-            pairs = [(src_ports[0], dst_ports[0]), (src_ports[1], dst_ports[0])]
-        elif n_src == 1 and n_dst == 1:
-            pairs = [(src_ports[0], dst_ports[0])]
-        else:
-            pairs = []
+        pairs = self._make_port_pairs(src_ports, dst_ports)
 
         failures = 0
         for s, d in pairs:
@@ -580,21 +587,31 @@ class RigController:
                 ),
             }
 
+        # new_id = current plugin count (Carla appends, so id == count)
+        new_id = len(node.effects)
+        handle = f"{node_name}/{role}"
+        remote = self._remote(node)
+        added_remote = False
+        added_graph = False
         try:
-            remote = self._remote(node)
-
-            # new_id = current plugin count (Carla appends, so id == count)
-            new_id = len(node.effects)
-
             await remote.add_plugin(plugin)
+            added_remote = True
 
-            handle = f"{node_name}/{role}"
             await remote.set_handle(new_id, handle)
 
             effect = Effect(handle=handle, role=role, plugin=plugin, plugin_id=new_id)
             self._graph.add_effect(node_name, effect, position)
+            added_graph = True
 
             await self._refresh_ids(node)
+            # If the handle didn't resolve, the stamp landed on the wrong
+            # plugin id (count/child drift) — fail and roll back rather than
+            # rewiring a chain with a bad id.
+            if effect.plugin_id is None:
+                raise RuntimeError(
+                    f"plugin added but handle '{handle}' did not resolve on the "
+                    "child instance (plugin-id drift)"
+                )
 
             ordered = [e.plugin_id for e in node.effects]
             await remote.rewire_chain(ordered)
@@ -607,6 +624,17 @@ class RigController:
                 "order": ordered,
             }
         except Exception as exc:
+            # Roll back so the graph and the child don't disagree.
+            if added_graph:
+                try:
+                    self._graph.remove_effect(node_name, handle)
+                except Exception:
+                    pass
+            if added_remote:
+                try:
+                    await remote.remove_plugin(new_id)
+                except Exception:
+                    pass
             return {"success": False, "message": f"Failed to add effect: {exc}", "error": str(exc)}
 
     async def remove_effect(self, node_name: str, role_or_handle: str) -> dict:
@@ -789,17 +817,24 @@ class RigController:
                     ),
                 }
 
+            previous = effect.bypassed
             effect.bypassed = on
             ordered = [e.plugin_id for e in node.effects if not e.bypassed]
             remote = self._remote(node)
 
-            if not on:
-                await remote.set_active(effect.plugin_id, True)
+            try:
+                if not on:
+                    await remote.set_active(effect.plugin_id, True)
 
-            await remote.rewire_chain(ordered)
+                await remote.rewire_chain(ordered)
 
-            if on:
-                await remote.set_active(effect.plugin_id, False)
+                if on:
+                    await remote.set_active(effect.plugin_id, False)
+            except Exception:
+                # Roll back the graph flag so describe_rig matches the
+                # patchbay reality after a mid-sequence failure.
+                effect.bypassed = previous
+                raise
 
             return {
                 "success": True,

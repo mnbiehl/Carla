@@ -106,6 +106,20 @@ class TestRewireChainConnectionsDisconnect:
 
         bridge.patchbay_disconnect.assert_not_called()
 
+    def test_missing_group_aborts_before_disconnecting(self):
+        # If a plugin's patchbay group isn't known yet (callback not fired),
+        # abort BEFORE Step-1 disconnects so the node isn't left silent.
+        conns = [{"id": 10}, {"id": 11}]
+        bridge = _make_bridge(connections=conns)
+        # plugin 0 deliberately NOT registered in _plugin_to_group_map
+
+        result = rewire_chain_connections(bridge, [0])
+
+        assert result["success"] is False
+        assert "no patchbay group" in result["error"]
+        bridge.patchbay_disconnect.assert_not_called()
+        bridge.patchbay_connect.assert_not_called()
+
 
 class TestRewireChainConnectionsWire:
     def test_single_stereo_plugin_wires_system_in_and_out(self):

@@ -384,6 +384,21 @@ class TestBypass:
         rewire_idx = names.index("rewire_chain")
         assert activate_idx < rewire_idx
 
+    def test_bypass_rolls_back_flag_when_rewire_fails(self):
+        # If the rewire raises mid-sequence, the graph's bypassed flag must be
+        # restored so describe_rig doesn't diverge from the patchbay.
+        ctrl, graph, fake = self._setup()
+
+        async def boom(plugin_ids):
+            raise RuntimeError("rewire failed")
+
+        fake.rewire_chain = boom
+
+        result = asyncio.run(ctrl.bypass("strat", "comp", on=True))
+
+        assert result["success"] is False
+        assert graph.get_node("strat").effects[0].bypassed is False  # restored
+
 
 # ---------------------------------------------------------------------------
 # set_param
