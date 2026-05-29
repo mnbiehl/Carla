@@ -38,16 +38,25 @@ class ChainLauncher:
         env["CARLA_MCP_PORT"] = str(mcp_port)
         env["CARLA_CLIENT_NAME"] = jack_name
 
-        # Use /usr/bin/python3 (system Python with PyQt5), not the venv python
-        log_file = open(f"/tmp/carla-chain-{name}.log", "w")
-        self._log_files[name] = log_file
-        proc = subprocess.Popen(
-            ["pw-jack", CARLA_PYTHON_PATH, self._carla_script],
-            env=env,
-            cwd=os.path.dirname(self._carla_script),
-            stdout=log_file,
-            stderr=log_file,
-        )
+        # Use /usr/bin/python3 (system Python with PyQt5), not the venv python.
+        # If opening the log or spawning fails, don't leak the allocated port
+        # or the log FD — nothing is registered, so terminate() can't clean up.
+        try:
+            log_file = open(f"/tmp/carla-chain-{name}.log", "w")
+            self._log_files[name] = log_file
+            proc = subprocess.Popen(
+                ["pw-jack", CARLA_PYTHON_PATH, self._carla_script],
+                env=env,
+                cwd=os.path.dirname(self._carla_script),
+                stdout=log_file,
+                stderr=log_file,
+            )
+        except Exception:
+            self._manager.release_port(mcp_port)
+            leaked = self._log_files.pop(name, None)
+            if leaked is not None:
+                leaked.close()
+            raise
 
         instance = CarlaInstance(
             name=name,

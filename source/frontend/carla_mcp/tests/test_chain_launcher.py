@@ -45,6 +45,18 @@ class TestChainLauncherLaunch:
             with pytest.raises(ValueError, match="already exists"):
                 launcher.launch("guitar")
 
+    def test_launch_releases_port_and_log_on_spawn_failure(self):
+        # If Popen raises, the allocated port and log FD must not leak —
+        # nothing gets registered, so terminate() could never clean up.
+        mgr = InstanceManager(base_mcp_port=3002)
+        launcher = ChainLauncher(instance_manager=mgr, carla_script="/fake/carla.py")
+        with patch("subprocess.Popen", side_effect=OSError("exec failed")):
+            with pytest.raises(OSError):
+                launcher.launch("guitar")
+        assert mgr.allocate_port() == 3002  # port was released for reuse
+        assert "guitar" not in launcher._log_files  # log handle not leaked
+        assert mgr.get("guitar") is None  # not registered
+
 
 class TestChainLauncherTerminate:
     def test_terminate_stops_process(self):

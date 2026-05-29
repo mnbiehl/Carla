@@ -29,6 +29,7 @@ chain_launcher = None
 jack_router = None
 rig_graph = None
 rig_controller = None
+rig_probe = None
 
 # Import tool registration functions
 from .tools.connection import register_connection_tools
@@ -327,7 +328,7 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
             else None
         )
 
-        global rig_graph, rig_controller
+        global rig_graph, rig_controller, rig_probe
         rig_graph = RigGraph()
         rig_controller = RigController(
             rig_graph,
@@ -364,13 +365,21 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
 
 def stop_mcp_server():
     """Stop the MCP server"""
-    global mcp_server, mcp_thread, backend_bridge, logger, instance_manager, chain_launcher, jack_router
+    global mcp_server, mcp_thread, backend_bridge, logger, instance_manager, chain_launcher, jack_router, rig_probe
 
     if mcp_server:
         logger.info("Stopping MCP server...")
         try:
             # Mark server as stopping
             mcp_server._stopping = True
+
+            # Stop any test tones (pw-cat nodes + feeder threads) first.
+            if rig_probe is not None:
+                try:
+                    rig_probe.stop_all_tones()
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"Failed to stop tones on shutdown: {e}")
 
             # Terminate all child Carla instances
             if chain_launcher is not None and instance_manager is not None:
@@ -405,6 +414,7 @@ def stop_mcp_server():
     instance_manager = None
     chain_launcher = None
     jack_router = None
+    rig_probe = None
 
 
 def is_mcp_server_running():
