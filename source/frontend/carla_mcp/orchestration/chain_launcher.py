@@ -64,13 +64,21 @@ class ChainLauncher:
         if instance is None:
             raise ValueError(f"Chain '{name}' not found")
 
-        if instance.process and instance.is_running:
-            instance.process.terminate()
+        proc = instance.process
+        if proc is not None:
+            # SIGTERM only if still alive; then ALWAYS wait() to reap — a
+            # child that already exited on its own is a zombie until reaped.
+            if proc.poll() is None:
+                proc.terminate()
             try:
-                instance.process.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                instance.process.kill()
-                logger.warning(f"Had to kill chain '{name}'")
+                logger.warning(f"Chain '{name}' ignored SIGTERM; killing")
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)  # reap the killed process
+                except subprocess.TimeoutExpired:
+                    logger.error(f"Failed to reap chain '{name}' after kill")
 
         if instance.mcp_port is not None:
             self._manager.release_port(instance.mcp_port)

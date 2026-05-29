@@ -318,6 +318,15 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
         from .rig import RigController, register_rig_tools
         from .rig.probe import RigProbe
 
+        # Reuse the plugin database populated by register_plugin_tools above
+        # so find_plugins can search discovered plugins (else it's unavailable).
+        from .tools import plugins as plugin_tools
+        plugin_db = (
+            plugin_tools.plugin_discoverer.get_database()
+            if plugin_tools.plugin_discoverer is not None
+            else None
+        )
+
         global rig_graph, rig_controller
         rig_graph = RigGraph()
         rig_controller = RigController(
@@ -325,6 +334,7 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
             instance_manager,
             chain_launcher,
             jack_router,
+            plugin_db=plugin_db,
         )
         rig_probe = RigProbe(rig_controller)
         register_rig_tools(mcp_server, rig_controller, probe=rig_probe)
