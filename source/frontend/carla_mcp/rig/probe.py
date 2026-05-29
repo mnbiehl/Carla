@@ -46,6 +46,15 @@ FULLSCALE_S16 = 32768.0
 # the default sink/source.  Instead we disable autoconnect and wire the stream
 # explicitly with pw-link.  (Verified live on PipeWire / Pop_OS 24.04.)
 AUTOCONNECT_OFF = "{ node.autoconnect=false }"
+
+
+def _pwcat_props(label: str) -> str:
+    """pw-cat ``-P`` properties: disable autoconnect AND set a unique
+    ``node.name`` so this stream's port appears as ``<label>:output_MONO`` /
+    ``<label>:input_MONO``.  That lets us match THIS pw-cat unambiguously even
+    when several probe streams of the same kind are alive at once (otherwise a
+    "first pw-cat: match" would cross-wire two concurrent tones)."""
+    return f"{{ node.autoconnect=false node.name={label} }}"
 WAV_HEADER_BYTES = 44  # a valid PCM WAV is larger than this once it has frames
 
 
@@ -167,6 +176,7 @@ class RigProbe:
         self._stream_tone = tone_streamer or self._default_stream_tone
         self._tone_procs: Dict[str, "subprocess.Popen"] = {}
         self._tone_stops: Dict[str, Callable[[], None]] = {}
+        self._probe_seq = 0  # monotonic, for unique per-stream pw-cat node names
 
     # -- port resolution -------------------------------------------------
 
@@ -214,6 +224,11 @@ class RigProbe:
         if node in self._tone_procs:
             self._stop_node(node)
 
+        # Unique node name so we can find THIS pw-cat's port even if other
+        # probe tones are alive (see _pwcat_props).
+        self._probe_seq += 1
+        label = f"lpcprobe_play_{node}_{self._probe_seq}"
+
         # One persistent pw-cat node reading raw s16 from stdin; a feeder
         # thread streams the sine into it so the tone never lapses.
         cmd = [
@@ -227,7 +242,7 @@ class RigProbe:
             "--channels",
             "1",
             "-P",
-            AUTOCONNECT_OFF,
+            _pwcat_props(label),
             "-",
         ]
         proc = self._sp.Popen(
@@ -240,7 +255,7 @@ class RigProbe:
         self._tone_stops[node] = self._stream_tone(proc, hz, db)
 
         # Wire the playback stream's output explicitly to the target input port.
-        src = await self._await_pwcat_port("output")
+        src = await self._await_pwcat_port("output", label)
         linked = bool(src)
         if src:
             self._link_ports(src, port)
@@ -295,8 +310,13 @@ class RigProbe:
         if not port:
             return {"success": False, "reason": f"no {at} ports resolved for {node!r}"}
 
+        # Unique node name + capture file so concurrent measures don't grab
+        # each other's stream port or clobber each other's WAV.
+        self._probe_seq += 1
+        label = f"lpcprobe_rec_{node}_{at}_{self._probe_seq}"
+
         n_samples = int(duration * SAMPLE_RATE)
-        out_path = self._cache_dir / f"capture_{node}_{at}.wav"
+        out_path = self._cache_dir / f"capture_{label}.wav"
         cmd = [
             "pw-cat",
             "-r",
@@ -309,13 +329,13 @@ class RigProbe:
             "-n",
             str(n_samples),
             "-P",
-            AUTOCONNECT_OFF,
+            _pwcat_props(label),
             str(out_path),
         ]
         # Spawn (not run) so we can wire the capture stream to the source port
         # after pw-cat creates it, then wait for it to capture -n samples.
         proc = self._sp.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        dst = await self._await_pwcat_port("input")
+        dst = await self._await_pwcat_port("input", label)
         if dst:
             self._link_ports(port, dst)
         # Offload the blocking wait so the asyncio event loop (and all child
@@ -342,21 +362,28 @@ class RigProbe:
 
     # -- helpers ---------------------------------------------------------
 
-    async def _await_pwcat_port(self, kind: str, attempts: int = 30, delay: float = 0.05) -> str:
-        """Poll until a ``pw-cat`` stream port of *kind* appears, or give up.
+    async def _await_pwcat_port(
+        self, kind: str, label: str, attempts: int = 30, delay: float = 0.05
+    ) -> str:
+        """Poll until the *label* stream port of *kind* appears, or give up.
 
-        *kind* is ``"output"`` (playback stream) or ``"input"`` (capture stream).
-        Returns the port string (e.g. ``pw-cat:output_MONO``) or ``""``.
+        *kind* is ``"output"`` (playback stream) or ``"input"`` (capture stream);
+        *label* is the unique ``node.name`` given to this pw-cat.  Returns the
+        port string (e.g. ``<label>:output_MONO``) or ``""``.
         """
         for _ in range(attempts):
-            p = self._find_pwcat_port(kind)
+            p = self._find_pwcat_port(kind, label)
             if p:
                 return p
             await asyncio.sleep(delay)
         return ""
 
-    def _default_find_pwcat_port(self, kind: str) -> str:
-        """Return the first ``pw-cat`` port of *kind* via ``pw-link -o``/``-i``."""
+    def _default_find_pwcat_port(self, kind: str, label: str) -> str:
+        """Return the *label* stream port of *kind* via ``pw-link -o``/``-i``.
+
+        Matches by the unique node name so concurrent probe streams don't
+        resolve to each other's port.
+        """
         flag = "-o" if kind == "output" else "-i"
         try:
             result = self._sp.run(["pw-link", flag], capture_output=True, text=True)
@@ -365,7 +392,7 @@ class RigProbe:
             return ""
         for line in out.splitlines():
             s = line.strip()
-            if s.startswith("pw-cat:") and kind in s:
+            if s.startswith(f"{label}:") and kind in s:
                 return s
         return ""
 

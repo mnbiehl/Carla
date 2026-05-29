@@ -54,7 +54,7 @@ def _make_probe(tmp_path: Path, controller=None, sp=None, analyzer=None,
     # By default, resolve pw-cat stream ports instantly without touching
     # real pw-link, and record link calls on the provided/created mock.
     if port_finder is None:
-        port_finder = lambda kind: f"pw-cat:{kind}_MONO"
+        port_finder = lambda kind, label: f"pw-cat:{kind}_MONO"
     if linker is None:
         linker = MagicMock()
     # No-op streamer by default so play_tone doesn't spin a real feeder
@@ -162,7 +162,10 @@ class TestPlayTone:
         # autoconnect disabled, no --target (which pw-cat ignores for ports)
         assert "--target" not in cmd
         assert "-P" in cmd
-        assert cmd[cmd.index("-P") + 1] == "{ node.autoconnect=false }"
+        # autoconnect disabled + a unique node.name for unambiguous matching
+        props = cmd[cmd.index("-P") + 1]
+        assert "node.autoconnect=false" in props
+        assert "node.name=" in props
         # playback stream output wired explicitly to the target input port
         linker.assert_called_once_with("pw-cat:output_MONO", "CarlaChain_strat:audio-in1")
 
@@ -213,6 +216,21 @@ class TestPlayTone:
         result = await probe.play_tone("strat", at="input")
         assert result["success"] is False
         assert "no input ports" in result["reason"]
+
+    def test_find_pwcat_port_matches_by_label_not_first(self, tmp_path):
+        # With two probe pw-cat streams of the same kind alive, the finder must
+        # return THIS stream's port (by node name), not the first one.
+        sp = MagicMock()
+        sp.run.return_value = MagicMock(
+            stdout=(
+                "lpcprobe_play_a_1:output_MONO\n"
+                "lpcprobe_play_b_2:output_MONO\n"
+            )
+        )
+        probe = _make_probe(tmp_path, sp=sp)
+        # call the real finder directly (the injected one is bypassed here)
+        got = probe._default_find_pwcat_port("output", "lpcprobe_play_b_2")
+        assert got == "lpcprobe_play_b_2:output_MONO"
 
 
 # ---------------------------------------------------------------------------

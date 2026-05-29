@@ -363,6 +363,8 @@ class RigController:
             note = f"No graph edge '{src}' -> '{dst}' was recorded"
 
         msg = f"Unrouted '{src}' -> '{dst}'"
+        if failures:
+            msg = f"{msg} ({failures} of {len(pairs)} disconnect(s) failed)"
         if note:
             msg = f"{msg} (note: {note})"
 
