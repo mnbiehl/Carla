@@ -44,6 +44,7 @@ from .tools.system import register_system_tools
 from .tools.orchestration import register_orchestration_tools
 from .tools.chain_builder import register_chain_builder_tools
 from .tools.chain_presets import register_chain_preset_tools
+from .tools.spectrum import register_spectrum_tools
 
 # Import resource registration functions
 from .resources.status import register_status_resources
@@ -165,6 +166,9 @@ def register_all_tools(backend_bridge):
 
     # Register chain preset tools
     register_chain_preset_tools(mcp_server, backend_bridge)
+
+    # Register spectrum analysis tools
+    register_spectrum_tools(mcp_server, backend_bridge)
 
     logger.info("All tools registered successfully")
 
