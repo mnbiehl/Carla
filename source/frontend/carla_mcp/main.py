@@ -311,7 +311,10 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
         from .orchestration.jack_router import JackRouter
 
         global instance_manager, chain_launcher, jack_router
-        instance_manager = InstanceManager(base_mcp_port=config.mcp_port + 1)
+        # main = config.mcp_port (3001), looper MCP = config.mcp_port + 1 (3002),
+        # so child Carla instances start at config.mcp_port + 2 (3003) to avoid
+        # colliding with the looper. allocate_port() also skips any in-use port.
+        instance_manager = InstanceManager(base_mcp_port=config.mcp_port + 2)
         chain_launcher = ChainLauncher(instance_manager=instance_manager)
         jack_router = JackRouter()
 

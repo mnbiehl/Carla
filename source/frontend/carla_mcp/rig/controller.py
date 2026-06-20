@@ -13,6 +13,7 @@ and is called automatically from create_track.
 from __future__ import annotations
 
 import logging
+import os
 import time as time_module
 from typing import Callable, List, Optional
 
@@ -596,7 +597,17 @@ class RigController:
         added_remote = False
         added_graph = False
         try:
-            await remote.add_plugin(plugin)
+            add_resp = await remote.add_plugin(plugin)
+            # Catch a failed add here rather than letting it surface later as a
+            # confusing "plugin-id drift". Two real failure modes: the child
+            # reports "❌ ..." (plugin not found / load failed), or an
+            # "Unknown tool: ..." reply arrives from the wrong server when MCP
+            # ports collide (the call never reached this Carla child).
+            resp_text = (add_resp or "").strip()
+            if resp_text.startswith("❌") or "Unknown tool" in resp_text:
+                raise RuntimeError(
+                    f"child instance did not load plugin '{plugin}': {resp_text!r}"
+                )
             added_remote = True
 
             await remote.set_handle(new_id, handle)
@@ -1059,3 +1070,172 @@ class RigController:
         plugins = [p.to_dict() for p in results[:50]]
 
         return {"success": True, "plugins": plugins}
+
+    # ------------------------------------------------------------------
+    # Rig persistence (process-per-track aware)
+    # ------------------------------------------------------------------
+
+    async def export_rig_state(self, chains_dir: str) -> dict:
+        """Serialize the whole rig: per-instance chains + nodes + routing.
+
+        In the process-per-track model each track/bus lives in its own child
+        Carla instance, so the *main* instance's project captures none of the
+        per-track plugins.  This walks the rig graph, asks every track/bus
+        child to save its own Carla project (``{chains_dir}/{node}.carxp``,
+        capturing plugins, parameters and the stamped handles), and returns a
+        JSON-serializable dict that — together with those .carxp files — is
+        everything :meth:`import_rig_state` needs to rebuild the rig.
+
+        Args:
+            chains_dir: Directory to write each child's ``<node>.carxp`` into.
+
+        Returns:
+            ``{"version": 1, "nodes": [...], "edges": [...], "errors": [...]}``.
+        """
+        os.makedirs(chains_dir, exist_ok=True)
+        nodes_out: list[dict] = []
+        errors: list[str] = []
+
+        for node in self._graph.nodes.values():
+            entry: dict = {
+                "name": node.name,
+                "kind": node.kind,
+                "instance": node.instance,
+                "jack_client": node.jack_client,
+                "source": node.source,
+                "effects": [
+                    {
+                        "role": e.role,
+                        "handle": e.handle,
+                        "plugin": e.plugin,
+                        "bypassed": e.bypassed,
+                    }
+                    for e in node.effects
+                ],
+            }
+            if node.kind in ("track", "bus"):
+                chain_file = os.path.join(chains_dir, f"{node.name}.carxp")
+                try:
+                    await self._remote(node).call("save_project", filename=chain_file)
+                    entry["chain_file"] = chain_file
+                except Exception as exc:  # noqa: BLE001 — report, don't abort
+                    errors.append(f"{node.name}: save_project failed: {exc}")
+                    entry["chain_file"] = None
+            nodes_out.append(entry)
+
+        return {
+            "version": 1,
+            "nodes": nodes_out,
+            "edges": [
+                {"src": e.src, "dst": e.dst, "gain_db": e.gain_db}
+                for e in self._graph.edges
+            ],
+            "errors": errors,
+        }
+
+    async def import_rig_state(self, state: dict, chains_dir: str) -> dict:
+        """Rebuild the rig from a :meth:`export_rig_state` dict + chain files.
+
+        Recreates endpoint aliases, respawns each track/bus child (restoring
+        its plugin rack and parameters from the saved ``<node>.carxp``),
+        re-resolves volatile plugin ids from the restored handles, rewires
+        each child's internal chain, and re-applies all routing edges.
+
+        Args:
+            state:      The dict previously returned by :meth:`export_rig_state`.
+            chains_dir: Directory holding the per-node ``<node>.carxp`` files.
+
+        Returns:
+            ``{"success": True, "tracks": [...], "messages": [...]}``.
+        """
+        messages: list[str] = []
+        nodes = state.get("nodes", [])
+
+        # 1. Endpoints first so track sources / aliases resolve.
+        for n in nodes:
+            if n.get("kind") != "endpoint":
+                continue
+            if not self._graph.has_node(n["name"]):
+                self._graph.add_node(
+                    Node(
+                        name=n["name"],
+                        kind="endpoint",
+                        jack_client=n.get("jack_client") or n["name"],
+                    )
+                )
+
+        # 2. Tracks and buses: spawn child, restore its saved project.
+        restored: list[str] = []
+        for n in nodes:
+            kind = n.get("kind")
+            if kind not in ("track", "bus"):
+                continue
+            name = n["name"]
+            if self._graph.has_node(name):
+                messages.append(f"{name}: already present, skipped")
+                continue
+
+            if kind == "track":
+                res = self.create_track(name, n.get("source"))
+            else:
+                res = self.create_bus(name)
+            if not res.get("success"):
+                messages.append(f"{name}: create failed: {res.get('message')}")
+                continue
+
+            node = self._graph.get_node(name)
+
+            # Restore plugins + params + handles from the child's saved project.
+            chain_file = n.get("chain_file")
+            if chain_file and os.path.exists(chain_file):
+                try:
+                    await self._remote(node).call("load_project", filename=chain_file)
+                    # Give the child engine a beat to instantiate the plugins
+                    # before we read their handles back.
+                    self._sleep(0.2)
+                except Exception as exc:  # noqa: BLE001
+                    messages.append(f"{name}: load_project failed: {exc}")
+            elif n.get("effects"):
+                messages.append(
+                    f"{name}: chain file missing ({chain_file!r}); chain not restored"
+                )
+
+            # Rebuild graph chain metadata, then resolve live plugin ids from
+            # the restored handles and rewire the child's internal chain.
+            node.effects = [
+                Effect(
+                    handle=e["handle"],
+                    role=e["role"],
+                    plugin=e["plugin"],
+                    bypassed=e.get("bypassed", False),
+                )
+                for e in n.get("effects", [])
+            ]
+            if node.effects:
+                try:
+                    await self._refresh_ids(node)
+                    ordered = [
+                        e.plugin_id for e in node.effects if e.plugin_id is not None
+                    ]
+                    if len(ordered) != len(node.effects):
+                        messages.append(
+                            f"{name}: {len(node.effects) - len(ordered)} handle(s) "
+                            "did not resolve after restore"
+                        )
+                    if ordered:
+                        await self._remote(node).rewire_chain(ordered)
+                except Exception as exc:  # noqa: BLE001
+                    messages.append(f"{name}: chain rewire failed: {exc}")
+
+            restored.append(name)
+
+        # 3. Re-apply routing edges not already wired by create_track.
+        for e in state.get("edges", []):
+            src, dst = e["src"], e["dst"]
+            if any(x.src == src and x.dst == dst for x in self._graph.edges):
+                continue
+            res = self.route(src, dst)
+            if not res.get("success"):
+                messages.append(f"route {src} -> {dst} failed: {res.get('message')}")
+
+        return {"success": True, "tracks": restored, "messages": messages}

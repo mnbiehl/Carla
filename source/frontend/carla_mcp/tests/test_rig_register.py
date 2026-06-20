@@ -35,6 +35,8 @@ EXPECTED_TOOLS = {
     "list_io",
     "alias_input",
     "find_plugins",
+    "export_rig_state",
+    "import_rig_state",
 }
 
 
@@ -48,6 +50,8 @@ def _make_mcp_and_controller():
     controller.move_effect = AsyncMock(return_value={"success": True})
     controller.set_param = AsyncMock(return_value={"success": True})
     controller.bypass = AsyncMock(return_value={"success": True})
+    controller.export_rig_state = AsyncMock(return_value={"version": 1, "nodes": [], "edges": []})
+    controller.import_rig_state = AsyncMock(return_value={"success": True, "tracks": []})
     controller._graph = RigGraph()
     register_rig_tools(mcp, controller)
     return mcp, controller
@@ -59,14 +63,14 @@ def _make_mcp_and_controller():
 
 
 class TestToolRegistration:
-    def test_all_14_tools_are_registered(self):
+    def test_all_16_tools_are_registered(self):
         mcp, _ = _make_mcp_and_controller()
         registered = set(mcp._tool_manager._tools.keys())
         assert EXPECTED_TOOLS == registered
 
-    def test_tool_count_is_exactly_14(self):
+    def test_tool_count_is_exactly_16(self):
         mcp, _ = _make_mcp_and_controller()
-        assert len(mcp._tool_manager._tools) == 14
+        assert len(mcp._tool_manager._tools) == 16
 
 
 # ---------------------------------------------------------------------------
@@ -203,19 +207,19 @@ def _make_mcp_with_probe():
 
 
 class TestProbeRegistration:
-    def test_probe_omitted_means_only_14_tools(self):
+    def test_probe_omitted_means_only_16_tools(self):
         mcp = FastMCP("test")
         controller = MagicMock()
         controller._graph = RigGraph()
         register_rig_tools(mcp, controller)
-        assert len(mcp._tool_manager._tools) == 14
+        assert len(mcp._tool_manager._tools) == 16
         assert PROBE_TOOLS.isdisjoint(mcp._tool_manager._tools.keys())
 
     def test_probe_adds_three_tools(self):
         mcp, _, _ = _make_mcp_with_probe()
         registered = set(mcp._tool_manager._tools.keys())
         assert EXPECTED_TOOLS | PROBE_TOOLS == registered
-        assert len(registered) == 17
+        assert len(registered) == 19
 
     def test_play_tone_forwards_to_probe(self):
         mcp, _, probe = _make_mcp_with_probe()

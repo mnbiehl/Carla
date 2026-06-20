@@ -269,6 +269,38 @@ def register_rig_tools(
             category=category if category else None,
         )
 
+    @mcp.tool()
+    async def export_rig_state(chains_dir: str) -> dict:
+        """Serialize the whole rig (per-track child chains + routing) to disk.
+
+        Each track/bus child saves its own Carla project into *chains_dir*;
+        the returned dict plus those files fully describe the rig and can be
+        replayed with :func:`import_rig_state`.  Needed because the main Carla
+        project does not capture the per-track child instances' plugins.
+
+        Parameters
+        ----------
+        chains_dir:
+            Directory to write each child's ``<node>.carxp`` into.
+        """
+        return await controller.export_rig_state(chains_dir)
+
+    @mcp.tool()
+    async def import_rig_state(state: dict, chains_dir: str) -> dict:
+        """Rebuild the rig from an :func:`export_rig_state` dict + chain files.
+
+        Respawns each track/bus child, restores its plugin rack and parameters
+        from the saved ``<node>.carxp``, and re-applies all routing.
+
+        Parameters
+        ----------
+        state:
+            The dict previously returned by :func:`export_rig_state`.
+        chains_dir:
+            Directory holding the per-node ``<node>.carxp`` files.
+        """
+        return await controller.import_rig_state(state, chains_dir)
+
     # ----- Probe tools (optional) -----------------------------------------
     if probe is None:
         return

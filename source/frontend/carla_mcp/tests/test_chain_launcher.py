@@ -6,6 +6,18 @@ from carla_mcp.orchestration.chain_launcher import ChainLauncher
 from carla_mcp.state.instance_manager import InstanceManager
 
 
+@pytest.fixture(autouse=True)
+def _all_ports_free():
+    """Treat every candidate port as free so allocation is deterministic.
+
+    allocate_port() bind-tests each port against loopback; these launcher
+    tests assert exact port numbers, so stub the probe to keep them
+    independent of whatever is bound on the test host.
+    """
+    with patch.object(InstanceManager, "_port_in_use", return_value=False):
+        yield
+
+
 class TestChainLauncherLaunch:
     def test_launch_creates_instance(self):
         mgr = InstanceManager(base_mcp_port=3002)
