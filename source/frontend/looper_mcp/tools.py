@@ -74,6 +74,8 @@ def _command_for_looper(action: str, target: str = "Selected", **kwargs):
         return {"Looper": [{"SetPan": kwargs["value"]}, parsed_target]}
     if action == "set_speed":
         return {"Looper": [{"SetSpeed": kwargs["speed"]}, parsed_target]}
+    if action == "test_tone":
+        return {"Looper": [{"TestTone": kwargs["enabled"]}, parsed_target]}
     raise ValueError(f"Unknown looper action: {action}")
 
 
@@ -249,6 +251,15 @@ def register_tools(mcp_server, looper_client):
         """Set a looper's pan position (-1.0 left to 1.0 right)."""
         result = await looper_client.send_command(
             _command_for_looper("set_pan", target=target, value=pan)
+        )
+        return _format_result(result)
+
+    @mcp_server.tool()
+    async def test_tone(enabled: bool = True, target: str = "Selected") -> str:
+        """Toggle a looper's test tone. enabled=True plays the tone, False stops it.
+        Target: Selected, All, or looper index (0, 1, 2...)."""
+        result = await looper_client.send_command(
+            _command_for_looper("test_tone", target=target, enabled=enabled)
         )
         return _format_result(result)
 
