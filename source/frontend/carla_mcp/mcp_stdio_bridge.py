@@ -69,6 +69,26 @@ def _build_rig_manifest(
     }
 
 
+def _tool_result_json(result) -> dict | None:
+    """Extract and JSON-parse the text payload of an MCP tool call result.
+
+    Tools that return a dict are delivered as one or more TextContent parts
+    holding JSON.  Returns the parsed object, or None if nothing parses.
+    """
+    parts = []
+    for content in getattr(result, "content", None) or []:
+        text = getattr(content, "text", None)
+        if text is not None:
+            parts.append(text)
+    raw = "".join(parts).strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 bridge = FastMCP("Carla MCP Bridge")
 
 # Track the Carla process we launched
@@ -198,9 +218,8 @@ async def carla_restart() -> str:
     return f"{stop_msg}\n{start_msg}"
 
 
-@bridge.tool()
-async def carla_status() -> str:
-    """Check if Carla is running and its MCP server is reachable."""
+def _carla_status_message() -> str:
+    """Get Carla status message (internal helper)."""
     process_running = _is_carla_running()
     reachable = _is_carla_reachable()
 
@@ -211,6 +230,12 @@ async def carla_status() -> str:
         return f"Carla process running (PID {_carla_process.pid}) but MCP not reachable yet."
     else:
         return "Carla is not running. Use carla_start to launch it."
+
+
+@bridge.tool()
+async def carla_status() -> str:
+    """Check if Carla is running and its MCP server is reachable."""
+    return _carla_status_message()
 
 
 def _is_looper_running() -> bool:
@@ -390,9 +415,8 @@ async def looper_restart() -> str:
     return f"{stop_msg}\n{start_msg}"
 
 
-@bridge.tool()
-async def looper_status() -> str:
-    """Check if the looper system is running and its MCP server is reachable."""
+def _looper_status_message() -> str:
+    """Get looper status message (internal helper)."""
     process_running = _is_looper_running()
     reachable = _is_looper_reachable()
 
@@ -403,6 +427,12 @@ async def looper_status() -> str:
         return f"Looper process running (PID {_looper_process.pid}) but MCP not reachable yet."
     else:
         return "Looper is not running. Use looper_start to launch it."
+
+
+@bridge.tool()
+async def looper_status() -> str:
+    """Check if the looper system is running and its MCP server is reachable."""
+    return _looper_status_message()
 
 
 @bridge.tool()
@@ -426,6 +456,34 @@ async def save_rig_session(name: str) -> str:
             messages.append(f"Carla session saved to {carla_path}")
         except Exception as e:
             messages.append(f"Failed to save Carla session: {e}")
+
+        # Serialize the process-per-track rig graph (each child instance's
+        # chain + routing). The main project above does NOT capture child
+        # instance plugins, so without this the per-track chains are lost.
+        chains_dir = str(session_dir / "chains")
+        try:
+            async with sse_client(CARLA_SSE_URL) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        "export_rig_state", {"chains_dir": chains_dir}
+                    )
+            rig_state = _tool_result_json(result)
+            if rig_state is not None:
+                (session_dir / "rig_state.json").write_text(
+                    json.dumps(rig_state, indent=2)
+                )
+                n_tracks = sum(
+                    1 for n in rig_state.get("nodes", [])
+                    if n.get("kind") in ("track", "bus")
+                )
+                messages.append(f"Rig graph saved ({n_tracks} track/bus chains)")
+                for err in rig_state.get("errors", []):
+                    messages.append(f"  ⚠ {err}")
+            else:
+                messages.append("Failed to serialize rig graph (no result)")
+        except Exception as e:
+            messages.append(f"Failed to save rig graph: {e}")
 
     # Save looper session if running
     looper_session = ""
@@ -482,6 +540,29 @@ async def load_rig_session(name: str) -> str:
         except Exception as e:
             messages.append(f"Failed to load Carla session: {e}")
 
+        # Rebuild the process-per-track rig graph: respawn each child
+        # instance and restore its chain. Must run after the main project
+        # loads (which only restores the main instance's own plugins).
+        rig_state_path = session_dir / "rig_state.json"
+        if rig_state_path.exists():
+            try:
+                rig_state = json.loads(rig_state_path.read_text())
+                chains_dir = str(session_dir / "chains")
+                async with sse_client(CARLA_SSE_URL) as (r, w):
+                    async with ClientSession(r, w) as session:
+                        await session.initialize()
+                        result = await session.call_tool(
+                            "import_rig_state",
+                            {"state": rig_state, "chains_dir": chains_dir},
+                        )
+                summary = _tool_result_json(result) or {}
+                tracks = summary.get("tracks", [])
+                messages.append(f"Rig graph restored ({len(tracks)} track/bus chains).")
+                for note in summary.get("messages", []):
+                    messages.append(f"  ⚠ {note}")
+            except Exception as e:
+                messages.append(f"Failed to restore rig graph: {e}")
+
     looper_cfg = manifest.get("backends", {}).get("looper", {})
     if looper_cfg.get("session"):
         if not _is_looper_reachable():
@@ -532,8 +613,8 @@ async def list_rig_sessions() -> str:
 @bridge.tool()
 async def get_rig_status() -> str:
     """Get the status of all rig backends (Carla and looper)."""
-    carla_msg = await carla_status()
-    looper_msg = await looper_status()
+    carla_msg = _carla_status_message()
+    looper_msg = _looper_status_message()
     return f"=== Carla ===\n{carla_msg}\n\n=== Looper ===\n{looper_msg}"
 
 

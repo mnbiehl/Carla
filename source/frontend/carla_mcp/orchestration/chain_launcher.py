@@ -38,16 +38,25 @@ class ChainLauncher:
         env["CARLA_MCP_PORT"] = str(mcp_port)
         env["CARLA_CLIENT_NAME"] = jack_name
 
-        # Use /usr/bin/python3 (system Python with PyQt5), not the venv python
-        log_file = open(f"/tmp/carla-chain-{name}.log", "w")
-        self._log_files[name] = log_file
-        proc = subprocess.Popen(
-            ["pw-jack", CARLA_PYTHON_PATH, self._carla_script],
-            env=env,
-            cwd=os.path.dirname(self._carla_script),
-            stdout=log_file,
-            stderr=log_file,
-        )
+        # Use /usr/bin/python3 (system Python with PyQt5), not the venv python.
+        # If opening the log or spawning fails, don't leak the allocated port
+        # or the log FD — nothing is registered, so terminate() can't clean up.
+        try:
+            log_file = open(f"/tmp/carla-chain-{name}.log", "w")
+            self._log_files[name] = log_file
+            proc = subprocess.Popen(
+                ["pw-jack", CARLA_PYTHON_PATH, self._carla_script],
+                env=env,
+                cwd=os.path.dirname(self._carla_script),
+                stdout=log_file,
+                stderr=log_file,
+            )
+        except Exception:
+            self._manager.release_port(mcp_port)
+            leaked = self._log_files.pop(name, None)
+            if leaked is not None:
+                leaked.close()
+            raise
 
         instance = CarlaInstance(
             name=name,
@@ -64,13 +73,21 @@ class ChainLauncher:
         if instance is None:
             raise ValueError(f"Chain '{name}' not found")
 
-        if instance.process and instance.is_running:
-            instance.process.terminate()
+        proc = instance.process
+        if proc is not None:
+            # SIGTERM only if still alive; then ALWAYS wait() to reap — a
+            # child that already exited on its own is a zombie until reaped.
+            if proc.poll() is None:
+                proc.terminate()
             try:
-                instance.process.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                instance.process.kill()
-                logger.warning(f"Had to kill chain '{name}'")
+                logger.warning(f"Chain '{name}' ignored SIGTERM; killing")
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)  # reap the killed process
+                except subprocess.TimeoutExpired:
+                    logger.error(f"Failed to reap chain '{name}' after kill")
 
         if instance.mcp_port is not None:
             self._manager.release_port(instance.mcp_port)

@@ -27,6 +27,9 @@ backend_bridge = None
 instance_manager = None
 chain_launcher = None
 jack_router = None
+rig_graph = None
+rig_controller = None
+rig_probe = None
 
 # Import tool registration functions
 from .tools.connection import register_connection_tools
@@ -41,6 +44,7 @@ from .tools.system import register_system_tools
 from .tools.orchestration import register_orchestration_tools
 from .tools.chain_builder import register_chain_builder_tools
 from .tools.chain_presets import register_chain_preset_tools
+from .tools.spectrum import register_spectrum_tools
 
 # Import resource registration functions
 from .resources.status import register_status_resources
@@ -162,6 +166,9 @@ def register_all_tools(backend_bridge):
 
     # Register chain preset tools
     register_chain_preset_tools(mcp_server, backend_bridge)
+
+    # Register spectrum analysis tools
+    register_spectrum_tools(mcp_server, backend_bridge)
 
     logger.info("All tools registered successfully")
 
@@ -304,12 +311,42 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
         from .orchestration.jack_router import JackRouter
 
         global instance_manager, chain_launcher, jack_router
-        instance_manager = InstanceManager(base_mcp_port=config.mcp_port + 1)
+        # main = config.mcp_port (3001), looper MCP = config.mcp_port + 1 (3002),
+        # so child Carla instances start at config.mcp_port + 2 (3003) to avoid
+        # colliding with the looper. allocate_port() also skips any in-use port.
+        instance_manager = InstanceManager(base_mcp_port=config.mcp_port + 2)
         chain_launcher = ChainLauncher(instance_manager=instance_manager)
         jack_router = JackRouter()
 
         register_orchestration_tools(mcp_server, chain_launcher, jack_router, instance_manager)
         logger.info("Orchestration tools registered")
+
+        # Create rig graph and controller, then register rig tools
+        from .rig.graph import RigGraph
+        from .rig import RigController, register_rig_tools
+        from .rig.probe import RigProbe
+
+        # Reuse the plugin database populated by register_plugin_tools above
+        # so find_plugins can search discovered plugins (else it's unavailable).
+        from .tools import plugins as plugin_tools
+        plugin_db = (
+            plugin_tools.plugin_discoverer.get_database()
+            if plugin_tools.plugin_discoverer is not None
+            else None
+        )
+
+        global rig_graph, rig_controller, rig_probe
+        rig_graph = RigGraph()
+        rig_controller = RigController(
+            rig_graph,
+            instance_manager,
+            chain_launcher,
+            jack_router,
+            plugin_db=plugin_db,
+        )
+        rig_probe = RigProbe(rig_controller)
+        register_rig_tools(mcp_server, rig_controller, probe=rig_probe)
+        logger.info("Rig tools registered (with probe)")
 
         # Register custom endpoints including SSE monitoring
         register_custom_endpoints()
@@ -335,13 +372,21 @@ def start_mcp_server(carla_host_instance=None, gui_instance=None):
 
 def stop_mcp_server():
     """Stop the MCP server"""
-    global mcp_server, mcp_thread, backend_bridge, logger, instance_manager, chain_launcher, jack_router
+    global mcp_server, mcp_thread, backend_bridge, logger, instance_manager, chain_launcher, jack_router, rig_probe
 
     if mcp_server:
         logger.info("Stopping MCP server...")
         try:
             # Mark server as stopping
             mcp_server._stopping = True
+
+            # Stop any test tones (pw-cat nodes + feeder threads) first.
+            if rig_probe is not None:
+                try:
+                    rig_probe.stop_all_tones()
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"Failed to stop tones on shutdown: {e}")
 
             # Terminate all child Carla instances
             if chain_launcher is not None and instance_manager is not None:
@@ -376,6 +421,7 @@ def stop_mcp_server():
     instance_manager = None
     chain_launcher = None
     jack_router = None
+    rig_probe = None
 
 
 def is_mcp_server_running():

@@ -1,5 +1,7 @@
 """Tests for multi-instance Carla management."""
 
+import socket
+
 import pytest
 from unittest.mock import Mock, patch
 from carla_mcp.state.instance_manager import CarlaInstance, InstanceManager
@@ -49,6 +51,17 @@ class TestCarlaInstance:
 class TestInstanceManagerPortAllocation:
     """Test port allocation and release."""
 
+    @pytest.fixture(autouse=True)
+    def _all_ports_free(self):
+        """Treat every candidate port as free unless a test overrides it.
+
+        allocate_port() bind-tests each port; these tests assert exact port
+        numbers, so stub the probe to stay independent of the test host.
+        Individual tests re-patch ``_port_in_use`` to exercise skip behaviour.
+        """
+        with patch.object(InstanceManager, "_port_in_use", return_value=False):
+            yield
+
     def test_allocates_sequential_ports(self):
         """Ports are allocated sequentially from base."""
         mgr = InstanceManager(base_mcp_port=3003)
@@ -76,6 +89,39 @@ class TestInstanceManagerPortAllocation:
         """Default base port is 3003 (3002 reserved for looper)."""
         mgr = InstanceManager()
         assert mgr.allocate_port() == 3003
+
+    def test_skips_in_use_ports(self):
+        """A candidate port already bound by another service is skipped."""
+        mgr = InstanceManager(base_mcp_port=3003)
+        with patch.object(mgr, "_port_in_use", side_effect=lambda p: p == 3003):
+            # 3003 is taken (e.g. by a stray process), so we get 3004.
+            assert mgr.allocate_port() == 3004
+            assert mgr.allocate_port() == 3005
+
+    def test_skips_released_port_if_now_taken(self):
+        """A released port that has since been taken is not handed back."""
+        mgr = InstanceManager(base_mcp_port=3003)
+        with patch.object(mgr, "_port_in_use", return_value=False):
+            port = mgr.allocate_port()  # 3003
+        mgr.release_port(port)
+        # 3003 got taken by something else after release; skip it.
+        with patch.object(mgr, "_port_in_use", side_effect=lambda p: p == 3003):
+            assert mgr.allocate_port() == 3004
+
+
+class TestInstanceManagerPortProbe:
+    """Test the real socket-based port-availability probe (no stubbing)."""
+
+    def test_port_in_use_detects_bound_socket(self):
+        """_port_in_use returns True for a port held by a live listener."""
+        mgr = InstanceManager()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            taken = held.getsockname()[1]
+            assert mgr._port_in_use(taken) is True
+        # Once released, the same port reads as free.
+        assert mgr._port_in_use(taken) is False
 
 
 class TestInstanceManagerLifecycle:

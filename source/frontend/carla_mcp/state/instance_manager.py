@@ -7,6 +7,7 @@ The InstanceManager tracks and controls all instances.
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
+import socket
 import subprocess
 
 
@@ -38,13 +39,39 @@ class InstanceManager:
         self._next_port = base_mcp_port
         self._released_ports: List[int] = []
 
+    def _port_in_use(self, port: int) -> bool:
+        """Return True if *port* is already bound by another process.
+
+        A child Carla instance's MCP server binds the port we hand it; if
+        another service (e.g. the looper MCP server, which independently
+        lives at ``config.mcp_port + 1``) already holds it, the child fails
+        to bind and our RemoteInstance calls silently reach the wrong
+        server.  Bind-test the loopback address to skip such ports.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return False
+            except OSError:
+                return True
+
     def allocate_port(self) -> int:
-        """Allocate next available MCP port, reusing released ports first."""
-        if self._released_ports:
-            return self._released_ports.pop(0)
-        port = self._next_port
-        self._next_port += 1
-        return port
+        """Allocate next available MCP port, reusing released ports first.
+
+        Skips any candidate that is already in use so a child instance never
+        collides with another service (notably the looper MCP server).
+        """
+        # Reuse released ports that are actually free; drop any now taken.
+        while self._released_ports:
+            port = self._released_ports.pop(0)
+            if not self._port_in_use(port):
+                return port
+        # Otherwise advance to the next free port.
+        while True:
+            port = self._next_port
+            self._next_port += 1
+            if not self._port_in_use(port):
+                return port
 
     def release_port(self, port: int) -> None:
         """Release a port for reuse."""

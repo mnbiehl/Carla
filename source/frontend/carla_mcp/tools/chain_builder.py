@@ -137,6 +137,22 @@ def _make_plugin_to_system_connections(
     return connections
 
 
+def _make_system_to_system_connections(
+    bridge: CarlaBackendBridge,
+) -> List[Tuple[int, int, int, int]]:
+    """Direct dry passthrough: instance input (group 1) → output (group 2).
+
+    Used when a chain has no plugins to wire (e.g. every effect bypassed) so
+    the node still passes audio dry instead of going silent.  Wires the stereo
+    pair L->L, R->R.  Verified live: a -12 dBFS tone into audio-in1 emerges at
+    audio-out1 at -12 dBFS with this wiring.
+    """
+    return [
+        (1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0, 2, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0),
+        (1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1, 2, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1),
+    ]
+
+
 def build_chain(
     bridge: CarlaBackendBridge,
     plugins: List[str],
@@ -222,8 +238,98 @@ def build_chain(
     return result
 
 
+def rewire_chain_connections(bridge: CarlaBackendBridge, plugin_ids: List[int]) -> dict:
+    """Disconnect all existing internal connections and rewire to the given plugin order.
+
+    Removes every currently-tracked (non-pending) internal connection, then
+    re-wires system-in → plugin_ids[0] → … → plugin_ids[-1] → system-out.
+
+    Args:
+        bridge:     The Carla backend bridge for the child instance.
+        plugin_ids: Ordered list of plugin IDs for the new chain.
+
+    Returns:
+        ``{"success": True, "plugin_order": plugin_ids, "connections": <count>}``
+        on success, or ``{"success": False, "error": <message>}`` on exception.
+    """
+    try:
+        # Resolve every plugin's patchbay group up front. If any is missing
+        # (its patchbay-added callback hasn't fired yet), abort BEFORE the
+        # Step-1 disconnects so we never leave the node silent.
+        groups = {}
+        for pid in plugin_ids:
+            g = bridge._plugin_to_group_map.get(pid)
+            if g is None:
+                return {
+                    "success": False,
+                    "error": f"plugin {pid} has no patchbay group yet; aborting rewire",
+                }
+            groups[pid] = g
+
+        # Step 1: disconnect all currently-tracked internal connections
+        for conn in bridge.get_patchbay_connections():
+            bridge.patchbay_disconnect(conn["id"])
+
+        # Step 2: if no plugins remain (e.g. every effect bypassed), wire the
+        # instance input straight to its output so the node passes signal dry
+        # instead of going silent.
+        if not plugin_ids:
+            count = 0
+            for ga, pa, gb, pb in _make_system_to_system_connections(bridge):
+                bridge.patchbay_connect(ga, pa, gb, pb)
+                count += 1
+            return {"success": True, "plugin_order": plugin_ids, "connections": count}
+
+        connection_count = 0
+
+        # Step 3: wire system input (group 1) → first plugin
+        first_id = plugin_ids[0]
+        for ga, pa, gb, pb in _make_system_to_plugin_connections(bridge, first_id, groups[first_id], 1):
+            bridge.patchbay_connect(ga, pa, gb, pb)
+            connection_count += 1
+
+        # Step 4: wire adjacent pairs
+        for i in range(len(plugin_ids) - 1):
+            pid_i = plugin_ids[i]
+            pid_next = plugin_ids[i + 1]
+            for ga, pa, gb, pb in _make_connections(bridge, pid_i, groups[pid_i], pid_next, groups[pid_next]):
+                bridge.patchbay_connect(ga, pa, gb, pb)
+                connection_count += 1
+
+        # Step 5: wire last plugin → system output (group 2)
+        last_id = plugin_ids[-1]
+        for ga, pa, gb, pb in _make_plugin_to_system_connections(bridge, last_id, groups[last_id], 2):
+            bridge.patchbay_connect(ga, pa, gb, pb)
+            connection_count += 1
+
+        return {"success": True, "plugin_order": plugin_ids, "connections": connection_count}
+
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 def register_chain_builder_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
-    """Register the build_effects_chain MCP tool."""
+    """Register the build_effects_chain and rewire_chain MCP tools."""
+
+    @mcp.tool()
+    def rewire_chain(plugin_ids: List[int]) -> str:
+        """Rewire the internal chain of this child instance to the given plugin order.
+
+        Disconnects all existing internal patchbay connections, then re-wires
+        system-in → plugin_ids[0] → … → plugin_ids[-1] → system-out using
+        auto-detected mono/stereo routing.
+
+        Args:
+            plugin_ids: Ordered list of current Carla plugin IDs for the chain.
+
+        Returns:
+            JSON result with success status, plugin_order, and connections count.
+        """
+        if not bridge:
+            return json.dumps({"success": False, "error": "Backend not available"})
+
+        result = rewire_chain_connections(bridge, plugin_ids)
+        return json.dumps(result)
 
     @mcp.tool()
     def build_effects_chain(

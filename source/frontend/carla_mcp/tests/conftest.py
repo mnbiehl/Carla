@@ -31,3 +31,8 @@ def mock_carla_host():
         "type": 4,  # LV2
     })
     return host
+
+
+@pytest.fixture(scope="session")
+def spectrum_fixtures_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("spectrum_fixtures")
