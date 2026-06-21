@@ -317,6 +317,11 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                 label = f"{source_channel} to {dest_channel}"
                 connections = []
 
+                # Map a single-channel selector to its port offset index.
+                # "left" -> 0, "right" -> 1, "mono" -> 0.
+                _src_index = {"left": 0, "right": 1, "mono": 0}
+                _dst_index = {"left": 0, "right": 1, "mono": 0}
+
                 if source_channel == "stereo" and dest_channel == "stereo":
                     connections.append((
                         source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
@@ -326,21 +331,35 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                         source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
                         dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
                     ))
-                elif source_channel == "mono":
-                    if dest_channel in ("stereo", "auto"):
-                        connections.append((
-                            source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
-                            dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
-                        ))
-                        connections.append((
-                            source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
-                            dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
-                        ))
-                    else:
-                        connections.append((
-                            source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
-                            dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
-                        ))
+                elif source_channel == "mono" and dest_channel in ("stereo", "auto"):
+                    # mono -> stereo: duplicate the single output to both inputs
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0
+                    ))
+                    connections.append((
+                        source_group, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                        dest_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1
+                    ))
+                elif source_channel in _src_index and dest_channel in _dst_index:
+                    # Single source channel (left/right/mono) -> single dest
+                    # channel (left/right/mono). Covers every L/R permutation,
+                    # including the previously-unhandled cross combinations
+                    # (left->right, right->left).
+                    connections.append((
+                        source_group,
+                        PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + _src_index[source_channel],
+                        dest_group,
+                        PATCHBAY_PORT_AUDIO_INPUT_OFFSET + _dst_index[dest_channel],
+                    ))
+
+            # Guard: if no connections were computed, fail loudly instead of
+            # reporting a false success (0 == 0 used to return ✅).
+            if not connections:
+                return (
+                    f"❌ No valid connection for {source_channel} → {dest_channel}. "
+                    "Unsupported channel combination."
+                )
 
             # Execute connections
             success_count = 0
@@ -354,6 +373,8 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
                     backend_bridge.get_plugin_info(dest_plugin_id).get('name', f'Plugin {dest_plugin_id}')
                 ]
                 return f"✅ Connected {plugin_names[0]} → {plugin_names[1]} ({label})"
+            elif success_count == 0:
+                return f"❌ Failed to connect: 0/{len(connections)} connections made"
             else:
                 return f"⚠️ Partially connected: {success_count}/{len(connections)} connections made"
 
@@ -394,9 +415,12 @@ def register_routing_tools(mcp: FastMCP, bridge: CarlaBackendBridge):
 
             connections = []
             if effective_channel == "stereo":
+                # Stereo: system L (system_port) -> plugin L, system R
+                # (system_port + 1) -> plugin R. The previous code reused the
+                # same source port for both, duplicating the mono source.
                 connections.append((system_group, system_port,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0))
-                connections.append((system_group, system_port,
+                connections.append((system_group, system_port + 1,
                                   plugin_group, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1))
             elif effective_channel == "left":
                 connections.append((system_group, system_port,

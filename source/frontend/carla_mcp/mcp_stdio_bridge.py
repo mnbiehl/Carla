@@ -36,6 +36,7 @@ from mcp.client.sse import sse_client
 from mcp import ClientSession
 
 from carla_mcp.tool_proxy import discover_and_register, unregister_all
+from carla_mcp.orchestration.jack_router import JackRouter
 
 CARLA_PORT = os.getenv("CARLA_MCP_PORT", "3001")
 CARLA_HOST = os.getenv("CARLA_MCP_HOST", "127.0.0.1")
@@ -59,13 +60,18 @@ def _build_rig_manifest(
     looper_running: bool,
     carla_session: str = "",
     looper_session: str = "",
+    routing: list = None,
 ) -> dict:
+    # version 2 adds the "routing" key: a list of [source, dest] pw-link pairs
+    # captured live at save time so non-standard external routing survives a
+    # save/load round-trip. v1 manifests (no "routing" key) still load.
     return {
-        "version": 1,
+        "version": 2,
         "backends": {
             "carla": {"running": carla_running, "session": carla_session},
             "looper": {"running": looper_running, "session": looper_session},
         },
+        "routing": [list(c) for c in routing] if routing else [],
     }
 
 
@@ -499,12 +505,23 @@ async def save_rig_session(name: str) -> str:
         except Exception as e:
             messages.append(f"Failed to save looper session: {e}")
 
+    # Capture live external pw-link routing (looper <-> Carla) so non-standard
+    # wiring survives a save/load round-trip. Without this, only the static
+    # 2-channel monitor wiring is restored on load.
+    routing = []
+    try:
+        routing = JackRouter().list_connections(filter_prefixes=["loopers:", "Carla:"])
+        messages.append(f"Captured {len(routing)} external routing connection(s)")
+    except Exception as e:
+        messages.append(f"Failed to capture routing: {e}")
+
     # Save rig manifest
     manifest = _build_rig_manifest(
         carla_running=_is_carla_reachable(),
         looper_running=_is_looper_reachable(),
         carla_session=carla_session,
         looper_session=looper_session,
+        routing=routing,
     )
     manifest_path = session_dir / "rig_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -595,6 +612,24 @@ async def load_rig_session(name: str) -> str:
     messages.append(
         f"[Routing] Monitors: {mon_total}/2, Captures: {capture_connected}/{len(captures[:2])}"
     )
+
+    # Replay saved external pw-link routing (v2+ manifests). The static wiring
+    # above remains the fallback for legacy v1 manifests that have no "routing"
+    # key. Each entry is a [source, dest] pair captured at save time.
+    saved_routing = manifest.get("routing") or []
+    if saved_routing:
+        routing_connected = 0
+        for entry in saved_routing:
+            try:
+                src, dst = entry
+            except (ValueError, TypeError):
+                continue
+            r = pw_link_connect(src, dst)
+            if r.success:
+                routing_connected += 1
+        messages.append(
+            f"[Routing] Saved connections: {routing_connected}/{len(saved_routing)}"
+        )
 
     return "\n".join(messages) if messages else "Nothing to load."
 

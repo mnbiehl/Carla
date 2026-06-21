@@ -221,6 +221,111 @@ class TestConnectPluginsAutoDetect:
         assert bridge.patchbay_connect.call_count == 1
 
 
+class TestConnectPluginsExplicitCrossChannels:
+    """FIX 1: explicit left/right cross combinations must wire correctly, and
+    a combination that yields no connections must fail loudly rather than
+    report false success (the old code returned ✅ for an empty list)."""
+
+    def test_explicit_left_to_right(self):
+        """left->right: a single source out 0 -> dest in 1 connection."""
+        bridge, host = _make_bridge_and_mcp()
+        info_stereo = Mock()
+        info_stereo.ins = 2
+        info_stereo.outs = 2
+        host.get_audio_port_count_info = Mock(return_value=info_stereo)
+
+        tools = _register_and_get_tools(bridge)
+        result = tools["connect_plugins"](
+            0, 1, source_channel="left", dest_channel="right"
+        )
+
+        assert bridge.patchbay_connect.call_count == 1
+        calls = bridge.patchbay_connect.call_args_list
+        assert calls[0] == call(3, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                                4, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1)
+        assert "Connected" in result
+        assert "❌" not in result
+
+    def test_explicit_right_to_left(self):
+        """right->left: a single source out 1 -> dest in 0 connection."""
+        bridge, host = _make_bridge_and_mcp()
+        info_stereo = Mock()
+        info_stereo.ins = 2
+        info_stereo.outs = 2
+        host.get_audio_port_count_info = Mock(return_value=info_stereo)
+
+        tools = _register_and_get_tools(bridge)
+        result = tools["connect_plugins"](
+            0, 1, source_channel="right", dest_channel="left"
+        )
+
+        assert bridge.patchbay_connect.call_count == 1
+        calls = bridge.patchbay_connect.call_args_list
+        assert calls[0] == call(3, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                                4, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0)
+        assert "Connected" in result
+        assert "❌" not in result
+
+    def test_explicit_left_to_left(self):
+        """left->left: source out 0 -> dest in 0."""
+        bridge, host = _make_bridge_and_mcp()
+        info_stereo = Mock()
+        info_stereo.ins = 2
+        info_stereo.outs = 2
+        host.get_audio_port_count_info = Mock(return_value=info_stereo)
+
+        tools = _register_and_get_tools(bridge)
+        result = tools["connect_plugins"](
+            0, 1, source_channel="left", dest_channel="left"
+        )
+
+        assert bridge.patchbay_connect.call_count == 1
+        calls = bridge.patchbay_connect.call_args_list
+        assert calls[0] == call(3, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                                4, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0)
+        assert "Connected" in result
+
+    def test_explicit_right_to_right(self):
+        """right->right: source out 1 -> dest in 1."""
+        bridge, host = _make_bridge_and_mcp()
+        info_stereo = Mock()
+        info_stereo.ins = 2
+        info_stereo.outs = 2
+        host.get_audio_port_count_info = Mock(return_value=info_stereo)
+
+        tools = _register_and_get_tools(bridge)
+        result = tools["connect_plugins"](
+            0, 1, source_channel="right", dest_channel="right"
+        )
+
+        assert bridge.patchbay_connect.call_count == 1
+        calls = bridge.patchbay_connect.call_args_list
+        assert calls[0] == call(3, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                                4, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1)
+        assert "Connected" in result
+
+    def test_empty_connection_list_reports_failure(self):
+        """A combination yielding no connections must fail loudly, not report
+        false success. stereo source -> mono dest has no mapping in the
+        explicit branch, so the old code returned a false ✅ for 0/0."""
+        bridge, host = _make_bridge_and_mcp()
+        info_stereo = Mock()
+        info_stereo.ins = 2
+        info_stereo.outs = 2
+        host.get_audio_port_count_info = Mock(return_value=info_stereo)
+
+        tools = _register_and_get_tools(bridge)
+        result = tools["connect_plugins"](
+            0, 1, source_channel="stereo", dest_channel="mono"
+        )
+
+        # No connections should be attempted...
+        assert bridge.patchbay_connect.call_count == 0
+        # ...and the result must be a failure, never a false "Connected".
+        assert "❌" in result
+        assert "Connected" not in result
+
+
 # ---------------------------------------------------------------------------
 # Part 3: connect_plugin_to_system tests
 # ---------------------------------------------------------------------------
@@ -318,6 +423,33 @@ class TestConnectSystemToPlugin:
         result = tools["connect_system_to_plugin"](1, 0)
 
         assert bridge.patchbay_connect.call_count == 2
+        assert "Connected" in result
+
+    def test_stereo_uses_distinct_source_ports(self):
+        """FIX 2: stereo mode must map system L (input) and system R (input+1)
+        to plugin L and plugin R. The old code wired the SAME source port to
+        both plugin inputs, duplicating the mono source."""
+        bridge, host = _make_bridge_and_mcp()
+        info_stereo = Mock()
+        info_stereo.ins = 2
+        info_stereo.outs = 2
+        host.get_audio_port_count_info = Mock(return_value=info_stereo)
+
+        tools = _register_and_get_tools(bridge)
+        # system_input=1 -> source ports OUTPUT_OFFSET+0 (L) and +1 (R)
+        result = tools["connect_system_to_plugin"](1, 0)
+
+        assert bridge.patchbay_connect.call_count == 2
+        calls = bridge.patchbay_connect.call_args_list
+        # System L (output offset + 0) -> plugin L (input offset + 0)
+        assert calls[0] == call(1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 0,
+                                3, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 0)
+        # System R (output offset + 1) -> plugin R (input offset + 1)
+        assert calls[1] == call(1, PATCHBAY_PORT_AUDIO_OUTPUT_OFFSET + 1,
+                                3, PATCHBAY_PORT_AUDIO_INPUT_OFFSET + 1)
+        # The two source ports must be DISTINCT (the bug duplicated one port).
+        src_ports = {calls[0].args[1], calls[1].args[1]}
+        assert len(src_ports) == 2, "stereo must use two distinct source ports"
         assert "Connected" in result
 
     def test_explicit_channel_overrides(self):
