@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pre-push — reins git hook
+#
+# Runs before `git push`. Responsibility:
+#   1. Ensure kb submodule is pushed (BLOCKS push if not and auto-push fails)
+#
+# Delegates all logic to `reins _pre-push` (Python).
+# =============================================================================
+
+if command -v reins &>/dev/null; then
+    reins _pre-push
+    exit $?
+fi
+
+exit 0

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": ".reins/hooks/enforce-doc-templates.sh",
+        "matcher": "Write|Edit"
+      },
+      {
+        "command": ".reins/hooks/block-raw-kb-git.sh",
+        "matcher": "Bash"
+      }
+    ]
+  }
+}

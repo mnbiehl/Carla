@@ -33,6 +33,41 @@ Source C → Comp C ─┘
 
 Multiple sources summing into a shared plugin input is standard mixing — Carla handles this correctly.
 
+## Shared Reverb: Add Parallel Per-Source Dry Gains
+
+A shared reverb is the right call (one space for all sources), but routing every
+source *through* it in series means the only dry blend you have is the reverb's own
+global dry/wet — you can no longer ride one instrument louder/quieter in the dry mix.
+Fix this by splitting dry and wet into **parallel** paths and giving each source its
+own dry-gain plugin:
+
+```
+Source A → Comp A → EQ A ─┬─→ Dry Gain A (Gain 2x2) ─┐
+Source B → Comp B → EQ B ─┼─→ Dry Gain B (Gain 2x2) ─┼─→ Output
+Source C → Comp C → EQ C ─┼─→ Dry Gain C (Gain 2x2) ─┤
+                          └─────→ Shared Reverb ──────┘   (fed by sum of all sources)
+```
+
+Each source fans out to (a) its own stereo `Gain 2x2` passthrough — the per-source
+**dry** fader — and (b) the shared reverb send. All dry gains and the reverb output
+sum to the master. Now every instrument's dry level *and* the shared wet return are
+adjustable from one instance.
+
+**Rule of thumb:** Any time a reverb (or other wet effect) is shared across sources,
+add one parallel stereo gain per source for independent dry control. Without it,
+"make the uke louder but keep the same room" has nowhere to live.
+
+**Convolution caveat:** Convolution IRs load only via `carla_set_plugin_file` on the
+**main** Carla instance, not on child track instances — so a convolution reverb must
+be the shared room on main, which makes the parallel dry-gain pattern mandatory there.
+
+**Watch-outs (learned in practice):**
+- Adding plugins to the main instance can silently **drop** existing hardware-output
+  links (`Carla:audio-out*` → interface, metronome → interface). Re-verify and
+  restore them after inserting the dry-gain plugins.
+- A convolution wet return can clip — trim the convolver's Output Gain (≈ −20 dB for
+  convoLV2), not the dry gains.
+
 ## Building a Chain
 
 **Preferred: Use `build_effects_chain` for simple serial chains:**

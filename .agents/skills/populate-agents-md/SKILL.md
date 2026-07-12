@@ -1,6 +1,6 @@
 ---
 name: populate-agents-md
-description: Analyze repo and populate AGENTS.md through collaborative dialogue. Use when AGENTS.md contains the UNPOPULATED marker or when user asks to set up/populate AGENTS.md.
+description: "Analyze repo and populate AGENTS.md through collaborative dialogue. Use when AGENTS.md contains the UNPOPULATED marker or when user asks to populate AGENTS.md."
 ---
 
 # Populate AGENTS.md
@@ -22,7 +22,7 @@ Follow a brainstorming-style dialogue. Gather information first, then ask questi
 Read these files if they exist — do NOT ask the user for them:
 
 - `AGENTS.md` (current state)
-- `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `AGENTS.md.bak` (existing agent config — use as baseline)
+- `CLAUDE.md`, `.cursorrules`, `AGENTS.md.bak` (existing agent config — use as baseline)
 - `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile` (tech stack)
 - `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile` (CI)
 - `README.md` (project description)
@@ -66,13 +66,13 @@ After user approves:
 
 1. Replace the TODO sections with the approved content
 2. Remove the `<!-- UNPOPULATED: ... -->` marker from line 1
-3. If existing CLAUDE.md/GEMINI.md was found, suggest whether to keep it alongside AGENTS.md or merge relevant content
+3. If existing CLAUDE.md was found, suggest whether to keep it alongside AGENTS.md or merge relevant content
 
 ## Handling Existing Agent Config
 
-If CLAUDE.md, GEMINI.md, or .cursorrules exist:
+If CLAUDE.md or .cursorrules exist:
 
 - **Extract useful info** (tech stack, conventions, build commands) as baseline for AGENTS.md
 - **Don't delete them** — suggest to the user whether to keep both or consolidate
-- **AGENTS.md is platform-agnostic** (read by Claude, Codex, Gemini, Cursor)
+- **AGENTS.md is platform-agnostic** (read by Claude, Codex, Cursor)
 - **CLAUDE.md is Claude-specific** — keep it for Claude-only settings if needed
