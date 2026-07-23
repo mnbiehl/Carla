@@ -171,3 +171,79 @@ def in_rig_port_space(src: str, dst: str) -> bool:
     desktop audio never matches and is never touched.
     """
     return bool(_RIG_CLIENT_RE.match(src) or _RIG_CLIENT_RE.match(dst))
+
+
+@dataclass
+class RigDiff:
+    """Named deviations between desired graph and observed reality."""
+
+    missing_edges: List[PortPair] = field(default_factory=list)
+    unexpected_connections: List[Link] = field(default_factory=list)
+    absent_nodes: List[str] = field(default_factory=list)
+    down_units: List[str] = field(default_factory=list)
+    dead_ports: List[str] = field(default_factory=list)
+    unresolved_effects: List[str] = field(default_factory=list)
+    waitable_ports: List[str] = field(default_factory=list)
+
+    def issues(self) -> List[str]:
+        """Every deviation as a report-ready line. Nothing summarized away."""
+        out: List[str] = []
+        out += [f"missing edge: {p.src} -> {p.dst} ({p.kind})" for p in self.missing_edges]
+        out += [f"unexpected connection: {l.src} -> {l.dst}" for l in self.unexpected_connections]
+        out += [f"absent node: {n}" for n in self.absent_nodes]
+        out += [f"down unit: {u}" for u in self.down_units]
+        out += [f"dead port reference: {m}" for m in self.dead_ports]
+        out += [f"unresolved effect: {m}" for m in self.unresolved_effects]
+        return out
+
+    @property
+    def issue_count(self) -> int:
+        return len(self.issues())
+
+    @property
+    def is_clean(self) -> bool:
+        return self.issue_count == 0
+
+    @property
+    def verdict(self) -> str:
+        return "OK" if self.is_clean else f"DEGRADED: {self.issue_count} issues"
+
+
+def diff(graph: RigGraph, observed: ObservedState) -> RigDiff:
+    """Pure structural diff between the desired graph and observed state."""
+    exp = expand_edges(graph, observed.output_ports, observed.input_ports)
+    live = {(l.src, l.dst) for l in observed.links}
+    want = {(p.src, p.dst) for p in exp.pairs}
+
+    missing = [p for p in exp.pairs if (p.src, p.dst) not in live]
+    unexpected = [
+        l for l in observed.links
+        if (l.src, l.dst) not in want and in_rig_port_space(l.src, l.dst)
+    ]
+    down = [
+        u.name for u in graph.runtime_units.values()
+        if not observed.unit_status.get(u.name, False)
+    ]
+    unresolved: List[str] = []
+    for node in graph.nodes.values():
+        if node.kind not in ("track", "bus") or not node.effects:
+            continue
+        handles = observed.instance_handles.get(node.name)
+        if handles is None:
+            continue  # instance not probed; its liveness is covered by unit status
+        have = set(handles.values())
+        for eff in node.effects:
+            if eff.handle not in have:
+                unresolved.append(
+                    f"{node.name}: effect '{eff.handle}' not resolved on child instance"
+                )
+
+    return RigDiff(
+        missing_edges=missing,
+        unexpected_connections=unexpected,
+        absent_nodes=exp.absent_nodes,
+        down_units=down,
+        dead_ports=exp.dead_ports,
+        unresolved_effects=unresolved,
+        waitable_ports=sorted(set(exp.waitable_ports)),
+    )
