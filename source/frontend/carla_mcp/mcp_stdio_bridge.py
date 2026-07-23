@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import subprocess
+import time
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -37,6 +38,16 @@ from mcp import ClientSession
 
 from carla_mcp.tool_proxy import discover_and_register, unregister_all
 from carla_mcp.orchestration.jack_router import JackRouter
+from carla_mcp.rig.converge import (
+    RigOps, do_load, do_routing_reset, do_save, do_stop, do_verify,
+)
+from carla_mcp.rig.graph import RigGraph
+from carla_mcp.rig.observe import observe as rig_observe
+from carla_mcp.rig.session import SessionError, read_session
+from carla_mcp.utils.pw_link import (
+    pw_link_connect, pw_link_disconnect, pw_link_list_inputs, pw_link_list_outputs,
+)
+from looper_mcp.looper_client import LooperClient
 
 CARLA_PORT = os.getenv("CARLA_MCP_PORT", "3001")
 CARLA_HOST = os.getenv("CARLA_MCP_HOST", "127.0.0.1")
@@ -53,26 +64,6 @@ LOOPER_SSE_URL = f"http://{LOOPER_MCP_HOST}:{LOOPER_MCP_PORT}/sse"
 LOOPER_MCP_SCRIPT = _THIS_DIR.parent / "looper_mcp" / "main.py"
 
 RIG_SESSION_DIR = Path.home() / ".config" / "rig-sessions"
-
-
-def _build_rig_manifest(
-    carla_running: bool,
-    looper_running: bool,
-    carla_session: str = "",
-    looper_session: str = "",
-    routing: list = None,
-) -> dict:
-    # version 2 adds the "routing" key: a list of [source, dest] pw-link pairs
-    # captured live at save time so non-standard external routing survives a
-    # save/load round-trip. v1 manifests (no "routing" key) still load.
-    return {
-        "version": 2,
-        "backends": {
-            "carla": {"running": carla_running, "session": carla_session},
-            "looper": {"running": looper_running, "session": looper_session},
-        },
-        "routing": [list(c) for c in routing] if routing else [],
-    }
 
 
 def _tool_result_json(result) -> dict | None:
@@ -111,6 +102,15 @@ _looper_log_file = None
 # Track the Looper engine process (Rust binary)
 _looper_engine_process: subprocess.Popen | None = None
 _looper_engine_log_file = None
+
+# Track the a2jmidid process (managed mode: the bridge owns a2j's lifecycle)
+_a2j_process: subprocess.Popen | None = None
+_a2j_log_file = None
+
+# Desired graph of the last loaded/saved session (verify_rig's default target)
+_current_graph: RigGraph | None = None
+
+LOOPER_JSON_PORT = int(os.getenv("LOOPER_JSON_PORT", "8088"))
 
 
 def _is_carla_running() -> bool:
@@ -285,10 +285,12 @@ async def _start_looper() -> str:
     env = os.environ.copy()
     env["LOOPER_MCP_PORT"] = str(LOOPER_MCP_PORT)
 
-    # Step 1: Launch the loopers audio engine via pw-jack
+    # Step 1: Launch the loopers audio engine via pw-jack in managed mode:
+    # the bridge/rig graph is the only writer of connections (no self-wiring,
+    # no MIDI auto-connect, no a2jmidid autostart in the engine).
     _looper_engine_log_file = open("/tmp/looper-engine.log", "w")
     _looper_engine_process = subprocess.Popen(
-        ["pw-jack", LOOPERS_PATH],
+        ["pw-jack", LOOPERS_PATH, "--managed"],
         env=env,
         stdout=_looper_engine_log_file,
         stderr=_looper_engine_log_file,
@@ -400,6 +402,61 @@ async def _stop_looper() -> str:
     return " ".join(messages)
 
 
+def _is_a2j_running() -> bool:
+    """True if our managed a2jmidid is alive, or an external one is running."""
+    global _a2j_process
+    if _a2j_process is not None:
+        if _a2j_process.poll() is None:
+            return True
+        _a2j_process = None
+    try:
+        return subprocess.run(
+            ["pgrep", "-x", "a2jmidid"], capture_output=True, timeout=3
+        ).returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _start_a2j() -> str | None:
+    """Start a2jmidid (managed). Returns None on success, error string on failure."""
+    global _a2j_process, _a2j_log_file
+    if _is_a2j_running():
+        return None
+    try:
+        _a2j_log_file = open("/tmp/a2jmidid.log", "w")
+        _a2j_process = subprocess.Popen(
+            ["a2jmidid", "-e"],
+            stdout=_a2j_log_file,
+            stderr=_a2j_log_file,
+        )
+    except FileNotFoundError:
+        return "a2jmidid not installed"
+    except Exception as e:  # noqa: BLE001 — report, don't raise into tool
+        return f"failed to start a2jmidid: {e}"
+    return None
+
+
+def _stop_a2j() -> str | None:
+    """Stop the managed a2jmidid. External instances are reported, not killed."""
+    global _a2j_process, _a2j_log_file
+    if _a2j_process is not None and _a2j_process.poll() is None:
+        _a2j_process.terminate()
+        try:
+            _a2j_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _a2j_process.kill()
+            _a2j_process.wait()
+        _a2j_process = None
+        if _a2j_log_file is not None:
+            _a2j_log_file.close()
+            _a2j_log_file = None
+        return None
+    _a2j_process = None
+    if _is_a2j_running():
+        return "a2jmidid running but not managed by the bridge; left alone"
+    return None
+
+
 @bridge.tool()
 async def looper_start() -> str:
     """Start the looper system (Looper MCP server + looperdooper)."""
@@ -441,197 +498,270 @@ async def looper_status() -> str:
     return _looper_status_message()
 
 
+async def _carla_call(tool: str, args: dict) -> dict | str | None:
+    """One SSE round-trip to the main Carla MCP server; returns parsed JSON
+    dict when the tool returned JSON, else the raw text, else None."""
+    async with sse_client(CARLA_SSE_URL) as (r, w):
+        async with ClientSession(r, w) as session:
+            await session.initialize()
+            result = await session.call_tool(tool, args)
+    parsed = _tool_result_json(result)
+    if parsed is not None:
+        return parsed
+    parts = [getattr(c, "text", "") or "" for c in getattr(result, "content", []) or []]
+    return "".join(parts).strip() or None
+
+
+def _unwrap_looper_state(reply: dict | None) -> dict | None:
+    """The Rust remote nests GetState under a "state" key; do_save/observe read
+    main_muted/loopers at the top level, so peel one "state" envelope."""
+    if isinstance(reply, dict) and "state" in reply and isinstance(reply["state"], dict):
+        return reply["state"]
+    return reply
+
+
+class BridgeOps(RigOps):
+    """Production RigOps: pw-link + SSE-to-Carla + looper TCP + Popen probes."""
+
+    def __init__(self) -> None:
+        self._router = JackRouter()
+        self._looper = LooperClient(port=LOOPER_JSON_PORT)
+
+    # ----- observation -------------------------------------------------
+
+    def _unit_probe(self, unit) -> bool:
+        if unit.kind == "carla-main":
+            return _is_carla_reachable()
+        if unit.kind == "looper-mcp":
+            return _is_looper_reachable()
+        if unit.kind == "looper-engine":
+            return any(p.startswith("loopers:") for p in pw_link_list_outputs())
+        if unit.kind == "a2j":
+            return _is_a2j_running()
+        if unit.kind == "carla-child":
+            client = f"CarlaChain_{unit.node}"
+            return f"{client}:audio-in1" in pw_link_list_inputs()
+        return False
+
+    async def observe(self, graph):
+        units = list(graph.runtime_units.values()) if graph is not None else []
+
+        async def _get_state():
+            try:
+                return _unwrap_looper_state(await self._looper.get_state())
+            except (ConnectionError, ValueError):
+                return None
+
+        async def _get_handles():
+            if not _is_carla_reachable():
+                return {}
+            result = await _carla_call("rig_handles", {})
+            if isinstance(result, dict):
+                return result.get("nodes", {})
+            return {}
+
+        return await rig_observe(
+            units,
+            list_links=self._router.list_connections,
+            list_outputs=pw_link_list_outputs,
+            list_inputs=pw_link_list_inputs,
+            unit_probe=self._unit_probe,
+            looper_get_state=_get_state,
+            carla_handles=_get_handles,
+        )
+
+    # ----- processes ----------------------------------------------------
+
+    async def start_unit(self, unit):
+        if unit.kind in ("looper-engine", "looper-mcp"):
+            message = await _start_looper()
+            return None if "exited" not in message else message
+        if unit.kind == "carla-main":
+            message = await _start_carla()
+            return None if "exited" not in message else message
+        if unit.kind == "a2j":
+            return _start_a2j()
+        if unit.kind == "carla-child":
+            return None  # respawned by import_rig_state during converge
+        return f"unknown unit kind: {unit.kind}"
+
+    async def stop_unit(self, unit):
+        if unit.kind == "carla-child":
+            if not _is_carla_reachable():
+                return None
+            try:
+                result = await _carla_call("remove_node", {"name": unit.node})
+            except Exception as e:  # noqa: BLE001
+                return f"remove_node failed: {e}"
+            if isinstance(result, dict) and not result.get("success", True):
+                return result.get("message", "remove_node failed")
+            return None
+        if unit.kind == "carla-main":
+            await _stop_carla()
+            return None
+        if unit.kind in ("looper-mcp", "looper-engine"):
+            await _stop_looper()
+            return None
+        if unit.kind == "a2j":
+            return _stop_a2j()
+        return f"unknown unit kind: {unit.kind}"
+
+    # ----- connections ---------------------------------------------------
+
+    def connect(self, src, dst):
+        result = pw_link_connect(src, dst)
+        return None if result.success else (result.message or "pw-link failed")
+
+    def disconnect(self, src, dst):
+        result = pw_link_disconnect(src, dst)
+        return None if result.success else (result.message or "pw-link failed")
+
+    def wait_ports(self, ports, timeout_s=15.0):
+        deadline = time.monotonic() + timeout_s
+        missing = list(ports)
+        while missing and time.monotonic() < deadline:
+            live = set(pw_link_list_outputs()) | set(pw_link_list_inputs())
+            missing = [p for p in missing if p not in live]
+            if missing:
+                time.sleep(0.5)
+        return missing
+
+    # ----- Carla payload ---------------------------------------------------
+
+    async def load_carla_project(self, path):
+        try:
+            await _carla_call("load_project", {"filename": path})
+            return None
+        except Exception as e:  # noqa: BLE001
+            return str(e)
+
+    async def save_carla_project(self, path):
+        try:
+            await _carla_call("save_project", {"filename": path})
+            return None
+        except Exception as e:  # noqa: BLE001
+            return str(e)
+
+    async def import_rig_state(self, state, chains_dir):
+        try:
+            result = await _carla_call(
+                "import_rig_state", {"state": state, "chains_dir": chains_dir}
+            )
+            return result if isinstance(result, dict) else {"messages": []}
+        except Exception as e:  # noqa: BLE001
+            return {"messages": [f"import_rig_state failed: {e}"]}
+
+    async def export_rig_state(self, chains_dir):
+        if not _is_carla_reachable():
+            return None
+        try:
+            result = await _carla_call("export_rig_state", {"chains_dir": chains_dir})
+            return result if isinstance(result, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    # ----- looper payload -------------------------------------------------
+
+    async def _looper_command(self, command) -> str | None:
+        try:
+            response = await self._looper.send_command(command)
+        except (ConnectionError, ValueError) as e:
+            return str(e)
+        if isinstance(response, dict) and "error" in response:
+            return str(response["error"])
+        return None
+
+    async def load_looper_session(self, project_path):
+        return await self._looper_command({"LoadSession": project_path})
+
+    async def looper_save_session_at(self, dir_path):
+        return await self._looper_command({"SaveSessionAt": dir_path})
+
+    async def looper_get_state(self):
+        try:
+            return _unwrap_looper_state(await self._looper.get_state())
+        except (ConnectionError, ValueError):
+            return None
+
+    async def set_looper_mutes(self, main_muted, all_muted):
+        err = await self._looper_command({"SetMainOutputMute": main_muted})
+        if err:
+            return err
+        return await self._looper_command({"SetAllOutputsMute": all_muted})
+
+
 @bridge.tool()
 async def save_rig_session(name: str) -> str:
-    """Save the full rig session (Carla + looper state + routing manifest)."""
+    """Save the live rig as a v3 rig_session.json (self-verifying).
+
+    Report opens with OK / DEGRADED: <n> issues / FAILED: <reason>.
+    """
+    global _current_graph
     session_dir = RIG_SESSION_DIR / name
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    messages = []
-
-    # Save Carla project if running
-    carla_session = ""
-    if _is_carla_reachable():
-        carla_path = str(session_dir / "carla_project.carxp")
-        try:
-            async with sse_client(CARLA_SSE_URL) as (r, w):
-                async with ClientSession(r, w) as session:
-                    await session.initialize()
-                    await session.call_tool("save_project", {"filename": carla_path})
-            carla_session = carla_path
-            messages.append(f"Carla session saved to {carla_path}")
-        except Exception as e:
-            messages.append(f"Failed to save Carla session: {e}")
-
-        # Serialize the process-per-track rig graph (each child instance's
-        # chain + routing). The main project above does NOT capture child
-        # instance plugins, so without this the per-track chains are lost.
-        chains_dir = str(session_dir / "chains")
-        try:
-            async with sse_client(CARLA_SSE_URL) as (r, w):
-                async with ClientSession(r, w) as session:
-                    await session.initialize()
-                    result = await session.call_tool(
-                        "export_rig_state", {"chains_dir": chains_dir}
-                    )
-            rig_state = _tool_result_json(result)
-            if rig_state is not None:
-                (session_dir / "rig_state.json").write_text(
-                    json.dumps(rig_state, indent=2)
-                )
-                n_tracks = sum(
-                    1 for n in rig_state.get("nodes", [])
-                    if n.get("kind") in ("track", "bus")
-                )
-                messages.append(f"Rig graph saved ({n_tracks} track/bus chains)")
-                for err in rig_state.get("errors", []):
-                    messages.append(f"  ⚠ {err}")
-            else:
-                messages.append("Failed to serialize rig graph (no result)")
-        except Exception as e:
-            messages.append(f"Failed to save rig graph: {e}")
-
-    # Save looper session if running
-    looper_session = ""
-    if _is_looper_reachable():
-        looper_path = str(session_dir / "looper_session.json")
-        try:
-            async with sse_client(LOOPER_SSE_URL) as (r, w):
-                async with ClientSession(r, w) as session:
-                    await session.initialize()
-                    await session.call_tool("save_session", {"path": looper_path})
-            looper_session = looper_path
-            messages.append(f"Looper session saved to {looper_path}")
-        except Exception as e:
-            messages.append(f"Failed to save looper session: {e}")
-
-    # Capture live external pw-link routing (looper <-> Carla) so non-standard
-    # wiring survives a save/load round-trip. Without this, only the static
-    # 2-channel monitor wiring is restored on load.
-    routing = []
+    report = await do_save(name, session_dir, BridgeOps())
     try:
-        routing = JackRouter().list_connections(filter_prefixes=["loopers:", "Carla:"])
-        messages.append(f"Captured {len(routing)} external routing connection(s)")
-    except Exception as e:
-        messages.append(f"Failed to capture routing: {e}")
-
-    # Save rig manifest
-    manifest = _build_rig_manifest(
-        carla_running=_is_carla_reachable(),
-        looper_running=_is_looper_reachable(),
-        carla_session=carla_session,
-        looper_session=looper_session,
-        routing=routing,
-    )
-    manifest_path = session_dir / "rig_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
-    messages.append(f"Rig manifest saved to {manifest_path}")
-
-    return "\n".join(messages)
+        _current_graph = read_session(session_dir).graph
+    except SessionError:
+        pass  # report already carries the FAILED verdict
+    return report
 
 
 @bridge.tool()
 async def load_rig_session(name: str) -> str:
-    """Load a saved rig session (starts backends if needed, restores state)."""
+    """Load a rig session: read/migrate -> clean slate -> converge -> verify.
+
+    Report opens with OK / DEGRADED: <n> issues / FAILED: <reason>.
+    """
+    global _current_graph
     session_dir = RIG_SESSION_DIR / name
-    manifest_path = session_dir / "rig_manifest.json"
-
-    if not manifest_path.exists():
-        return f"No rig session found at {session_dir}"
-
-    manifest = json.loads(manifest_path.read_text())
-    messages = []
-
-    carla_cfg = manifest.get("backends", {}).get("carla", {})
-    if carla_cfg.get("session"):
-        if not _is_carla_reachable():
-            messages.append(await _start_carla())
+    report = await do_load(name, session_dir, BridgeOps())
+    if not report.startswith("FAILED"):
         try:
-            async with sse_client(CARLA_SSE_URL) as (r, w):
-                async with ClientSession(r, w) as session:
-                    await session.initialize()
-                    await session.call_tool(
-                        "load_project", {"filename": carla_cfg["session"]}
-                    )
-            messages.append("Carla session loaded.")
-        except Exception as e:
-            messages.append(f"Failed to load Carla session: {e}")
+            _current_graph = read_session(session_dir).graph
+        except SessionError:
+            pass
+    return report
 
-        # Rebuild the process-per-track rig graph: respawn each child
-        # instance and restore its chain. Must run after the main project
-        # loads (which only restores the main instance's own plugins).
-        rig_state_path = session_dir / "rig_state.json"
-        if rig_state_path.exists():
-            try:
-                rig_state = json.loads(rig_state_path.read_text())
-                chains_dir = str(session_dir / "chains")
-                async with sse_client(CARLA_SSE_URL) as (r, w):
-                    async with ClientSession(r, w) as session:
-                        await session.initialize()
-                        result = await session.call_tool(
-                            "import_rig_state",
-                            {"state": rig_state, "chains_dir": chains_dir},
-                        )
-                summary = _tool_result_json(result) or {}
-                tracks = summary.get("tracks", [])
-                messages.append(f"Rig graph restored ({len(tracks)} track/bus chains).")
-                for note in summary.get("messages", []):
-                    messages.append(f"  ⚠ {note}")
-            except Exception as e:
-                messages.append(f"Failed to restore rig graph: {e}")
 
-    looper_cfg = manifest.get("backends", {}).get("looper", {})
-    if looper_cfg.get("session"):
-        if not _is_looper_reachable():
-            messages.append(await _start_looper())
+@bridge.tool()
+async def verify_rig(name: str = "") -> str:
+    """Read-only: is the live rig still what the session says it should be?
+
+    Verifies against the named session, or the last loaded/saved session
+    when *name* is empty. Uses the exact same diff the load path uses.
+    """
+    if name:
         try:
-            async with sse_client(LOOPER_SSE_URL) as (r, w):
-                async with ClientSession(r, w) as session:
-                    await session.initialize()
-                    await session.call_tool(
-                        "load_session", {"path": looper_cfg["session"]}
-                    )
-            messages.append("Looper session loaded.")
-        except Exception as e:
-            messages.append(f"Failed to load looper session: {e}")
+            graph = read_session(RIG_SESSION_DIR / name).graph
+        except SessionError as e:
+            return f"FAILED: {e}"
+    elif _current_graph is not None:
+        graph = _current_graph
+    else:
+        return "FAILED: no rig session loaded this run; pass a session name"
+    return await do_verify(graph, BridgeOps())
 
-    # Restore external Carla wiring (loopers handles its own JACK connections)
-    from carla_mcp.utils.pw_link import (
-        ensure_carla_to_monitors, find_capture_input_ports, pw_link_connect,
-    )
 
-    monitors_result = ensure_carla_to_monitors()
-    captures = find_capture_input_ports()
-    capture_connected = 0
-    for i, cap in enumerate(captures[:2]):
-        r = pw_link_connect(cap, f"Carla:audio-in{i + 1}")
-        if r.success:
-            capture_connected += 1
+@bridge.tool()
+async def rig_routing_reset() -> str:
+    """Clean slate: disconnect every pw link touching rig port space
+    (loopers:*, Carla*, and MIDI into the looper). Manual escape hatch
+    for stale PipeWire link tangles."""
+    return await do_routing_reset(BridgeOps())
 
-    mon_total = monitors_result["connected"] + monitors_result["already_connected"]
-    messages.append(
-        f"[Routing] Monitors: {mon_total}/2, Captures: {capture_connected}/{len(captures[:2])}"
-    )
 
-    # Replay saved external pw-link routing (v2+ manifests). The static wiring
-    # above remains the fallback for legacy v1 manifests that have no "routing"
-    # key. Each entry is a [source, dest] pair captured at save time.
-    saved_routing = manifest.get("routing") or []
-    if saved_routing:
-        routing_connected = 0
-        for entry in saved_routing:
-            try:
-                src, dst = entry
-            except (ValueError, TypeError):
-                continue
-            r = pw_link_connect(src, dst)
-            if r.success:
-                routing_connected += 1
-        messages.append(
-            f"[Routing] Saved connections: {routing_connected}/{len(saved_routing)}"
-        )
-
-    return "\n".join(messages) if messages else "Nothing to load."
+@bridge.tool()
+async def stop_rig(save_as: str = "") -> str:
+    """Tear the rig down (children -> main Carla -> looper MCP -> looper
+    engine -> a2j), verified dead. Optionally save first with *save_as*."""
+    global _current_graph
+    parts = []
+    ops = BridgeOps()
+    if save_as:
+        parts.append(await do_save(save_as, RIG_SESSION_DIR / save_as, ops))
+    parts.append(await do_stop(_current_graph, ops))
+    _current_graph = None
+    return "\n\n".join(parts)
 
 
 @bridge.tool()
@@ -747,6 +877,19 @@ def _atexit_cleanup():
     if _looper_engine_log_file is not None:
         _looper_engine_log_file.close()
         _looper_engine_log_file = None
+
+    global _a2j_process, _a2j_log_file
+    if _a2j_process is not None and _a2j_process.poll() is None:
+        _a2j_process.terminate()
+        try:
+            _a2j_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _a2j_process.kill()
+            _a2j_process.wait()
+        _a2j_process = None
+    if _a2j_log_file is not None:
+        _a2j_log_file.close()
+        _a2j_log_file = None
 
 
 atexit.register(_atexit_cleanup)

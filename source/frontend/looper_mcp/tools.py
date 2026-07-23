@@ -330,6 +330,25 @@ def register_tools(mcp_server, looper_client):
         return _format_result(result)
 
     @mcp_server.tool()
+    async def save_session_at(path: str) -> str:
+        """Save the looper session into exactly this directory (created if
+        needed) — no auto-named subdirectory. Used by rig session saves."""
+        result = await looper_client.send_command({"SaveSessionAt": path})
+        return _format_result(result)
+
+    @mcp_server.tool()
+    async def set_main_output_mute(muted: bool) -> str:
+        """Set (not toggle) main output mute — idempotent restore setter."""
+        result = await looper_client.send_command({"SetMainOutputMute": muted})
+        return _format_result(result)
+
+    @mcp_server.tool()
+    async def set_all_outputs_mute(muted: bool) -> str:
+        """Set (not toggle) all-outputs mute — idempotent restore setter."""
+        result = await looper_client.send_command({"SetAllOutputsMute": muted})
+        return _format_result(result)
+
+    @mcp_server.tool()
     async def get_state() -> str:
         """Get the current looper engine state (tempo, looper count, levels, etc.)."""
         import json

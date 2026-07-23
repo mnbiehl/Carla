@@ -301,6 +301,16 @@ def register_rig_tools(
         """
         return await controller.import_rig_state(state, chains_dir)
 
+    @mcp.tool()
+    async def rig_handles() -> dict:
+        """Re-resolve live plugin handles on every track/bus child instance.
+
+        Read-only. Returns ``{"nodes": {node: {plugin_id: handle}},
+        "errors": [...]}``; used by the bridge's rig reconciler to verify
+        that every saved effect still exists after a restore.
+        """
+        return await controller.snapshot_handles()
+
     # ----- Probe tools (optional) -----------------------------------------
     if probe is None:
         return

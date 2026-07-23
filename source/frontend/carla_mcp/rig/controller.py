@@ -1239,3 +1239,24 @@ class RigController:
                 messages.append(f"route {src} -> {dst} failed: {res.get('message')}")
 
         return {"success": True, "tracks": restored, "messages": messages}
+
+    async def snapshot_handles(self) -> dict:
+        """Re-resolve every track/bus child's live plugin handles.
+
+        Read-only observation surface for the reconciler: one list_handles
+        round-trip per child.  Failures are reported per node, never raised.
+
+        Returns:
+            ``{"nodes": {node_name: {plugin_id_str: handle}}, "errors": [...]}``.
+        """
+        nodes: dict = {}
+        errors: list[str] = []
+        for node in list(self._graph.nodes.values()):
+            if node.kind not in ("track", "bus"):
+                continue
+            try:
+                handles = await self._remote(node).list_handles()
+                nodes[node.name] = {str(pid): h for pid, h in handles.items()}
+            except Exception as exc:  # noqa: BLE001 — report, don't abort
+                errors.append(f"{node.name}: {exc}")
+        return {"nodes": nodes, "errors": errors}
