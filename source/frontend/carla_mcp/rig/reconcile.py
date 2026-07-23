@@ -247,3 +247,60 @@ def diff(graph: RigGraph, observed: ObservedState) -> RigDiff:
         unresolved_effects=unresolved,
         waitable_ports=sorted(set(exp.waitable_ports)),
     )
+
+
+UNIT_START_ORDER = {
+    "looper-engine": 0,
+    "looper-mcp": 1,
+    "a2j": 2,
+    "carla-main": 3,
+    "carla-child": 4,
+}
+
+
+@dataclass(frozen=True)
+class Action:
+    """One ordered fix step produced by plan()."""
+
+    op: str  # "start_unit" | "wait_ports" | "disconnect" | "connect"
+    unit: Optional[str] = None
+    ports: Tuple[str, ...] = ()
+    src: Optional[str] = None
+    dst: Optional[str] = None
+    kind: str = "audio"
+
+
+def plan(d: RigDiff, graph: RigGraph) -> List[Action]:
+    """Turn a diff into ordered fix actions: processes -> ports -> connections."""
+    actions: List[Action] = []
+
+    def _order(unit_name: str) -> Tuple[int, str]:
+        unit = graph.runtime_units.get(unit_name)
+        rank = UNIT_START_ORDER.get(unit.kind, 9) if unit else 9
+        return (rank, unit_name)
+
+    for name in sorted(d.down_units, key=_order):
+        actions.append(Action(op="start_unit", unit=name))
+
+    waits = tuple(sorted(set(d.waitable_ports)))
+    if waits:
+        actions.append(Action(op="wait_ports", ports=waits))
+
+    for link in d.unexpected_connections:
+        actions.append(Action(op="disconnect", src=link.src, dst=link.dst))
+
+    for pair in d.missing_edges:
+        actions.append(Action(op="connect", src=pair.src, dst=pair.dst, kind=pair.kind))
+
+    return actions
+
+
+def render_report(verdict: str, sections: List[Tuple[str, List[str]]]) -> str:
+    """Render a tool report: verdict line first, then non-empty sections."""
+    lines = [verdict]
+    for title, items in sections:
+        if not items:
+            continue
+        lines.append(f"[{title}]")
+        lines.extend(f"  {item}" for item in items)
+    return "\n".join(lines)
