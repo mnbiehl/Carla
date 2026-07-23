@@ -176,3 +176,74 @@ class TestRoundTrip:
         assert load_report.splitlines()[0] == "OK", load_report
         graph = read_session(sdir).graph
         assert asyncio.run(do_verify(graph, ops)).splitlines()[0] == "OK"
+
+
+class OrderRecordingOps(RoundTripOps):
+    """RoundTripOps that records an ordered connect/disconnect event log.
+
+    Used to pin *when* do_load's clean-slate step runs relative to wiring,
+    not just *whether* it runs -- see test_load_clears_stale_links_before_any_connect.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def connect(self, src, dst):
+        self.events.append(("connect", src, dst))
+        return super().connect(src, dst)
+
+    def disconnect(self, src, dst):
+        self.events.append(("disconnect", src, dst))
+        return super().disconnect(src, dst)
+
+
+class TestCleanSlateOrdering:
+    def test_load_clears_stale_links_before_any_connect(self, tmp_path):
+        """Pin the 2026-04-10 retro follow-up: do_load's clean-slate (step 2)
+        must disconnect stale rig-space links *before* any connect happens,
+        not merely as a side effect of the retry pass that runs after
+        wiring (step 6). Deleting clean-slate entirely still converges to
+        the right end state via the retry pass, so end-state-only
+        assertions (as in test_save_reset_load_verify_is_ok) cannot tell
+        the two apart; ordering is the only thing that can.
+        """
+        ops = OrderRecordingOps()
+        sdir = tmp_path / "ordering"
+
+        save_report = asyncio.run(do_save("ordering", sdir, ops))
+        assert save_report.splitlines()[0] == "OK", save_report
+
+        # Wipe all rig-space routing (as do_routing_reset would) so that
+        # do_load is *forced* to reconnect every desired pair regardless of
+        # whether clean-slate runs -- otherwise, if the previously-correct
+        # wiring were simply left undisturbed, step 5 would have nothing to
+        # connect and the test couldn't tell "no clean-slate" apart from
+        # "clean-slate ran". Then seed a stale crossed rig-space link (same
+        # class as the 2026-04-10 regression retro) and clear the event log
+        # so only do_load's actions are recorded.
+        reset_report = asyncio.run(do_routing_reset(ops))
+        assert reset_report.splitlines()[0] == "OK", reset_report
+        stale = ("loopers:loop0_out_r", "CarlaChain_strat:audio-in1")
+        ops.links.add(stale)
+        ops.events.clear()
+
+        load_report = asyncio.run(do_load("ordering", sdir, ops))
+        assert load_report.splitlines()[0] == "OK", load_report
+
+        disconnect_event = ("disconnect",) + stale
+        assert disconnect_event in ops.events, ops.events
+
+        disconnect_idx = ops.events.index(disconnect_event)
+        connect_indices = [i for i, e in enumerate(ops.events) if e[0] == "connect"]
+        assert connect_indices, "expected at least one connect event"
+
+        # THE PIN: clean-slate's disconnect must precede the first connect.
+        # If do_load's step-2 clean-slate loop were removed, this stale
+        # link would only be cleared by the step-6 retry pass, which runs
+        # AFTER all step-5 connects -- making this assertion fail.
+        assert disconnect_idx < connect_indices[0], (
+            "clean-slate disconnect must happen before any connect "
+            f"(disconnect at {disconnect_idx}, first connect at "
+            f"{connect_indices[0]}); events={ops.events}"
+        )
