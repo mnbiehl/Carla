@@ -10,6 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+NODE_KINDS = ("endpoint", "track", "bus", "loop", "app", "midi")
+EDGE_KINDS = ("audio", "midi")
+
 
 @dataclass
 class Effect:
@@ -35,12 +38,18 @@ class Node:
     """A node in the rig graph.
 
     name       — stable human name, e.g. "strat", "in:guitar", "reverb".
-    kind       — one of "endpoint", "track", or "bus".
+    kind       — one of "endpoint", "track", "bus", "loop", "app", or "midi".
     instance   — Carla instance name that owns this node's chain,
                  e.g. "CarlaChain_strat" (None for endpoints or unstarted nodes).
     jack_client — JACK client name for the node's audio I/O (optional).
     source     — for a track: the endpoint name it receives audio from (optional).
     effects    — ordered effects chain; only valid for "track" and "bus" nodes.
+    looper_id  — loop nodes: engine looper id (volatile-ish, data only).
+    port_index — loop nodes: N in loopers:loopN_{in,out}_{l,r}.
+    main_muted — app:looper only.
+    all_muted  — app:looper only.
+    port_pattern — midi nodes: regex matched against live ports.
+    chain_file — track/bus: session-relative .carxp pointer.
     """
 
     name: str
@@ -49,20 +58,48 @@ class Node:
     jack_client: Optional[str] = None
     source: Optional[str] = None
     effects: List[Effect] = field(default_factory=list)
+    # v3 whole-rig fields
+    looper_id: Optional[int] = None      # loop nodes: engine looper id (volatile-ish, data only)
+    port_index: Optional[int] = None     # loop nodes: N in loopers:loopN_{in,out}_{l,r}
+    main_muted: bool = False             # app:looper only
+    all_muted: bool = False              # app:looper only
+    port_pattern: Optional[str] = None   # midi nodes: regex matched against live ports
+    chain_file: Optional[str] = None     # track/bus: session-relative .carxp pointer
 
 
 @dataclass
 class Edge:
-    """A directed audio edge from one node to another.
+    """A directed edge from one node to another.
 
-    src     — name of the source node.
-    dst     — name of the destination node.
-    gain_db — gain applied on this connection, in dB (0.0 = unity).
+    src/dst   — node names.
+    gain_db   — gain applied on this connection, in dB (0.0 = unity).
+    kind      — "audio" or "midi".
+    src_port/dst_port — when both set, this edge binds these exact ports
+                (used by the migrator and link-lifting; bypasses stereo
+                expansion in the reconciler).
     """
 
     src: str
     dst: str
     gain_db: float = 0.0
+    kind: str = "audio"
+    src_port: Optional[str] = None
+    dst_port: Optional[str] = None
+
+
+@dataclass
+class RuntimeUnit:
+    """A process the rig expects to be alive, independent of port wiring.
+
+    name — stable unit name: "carla:main", "carla:<node>", "looper:engine",
+           "looper:mcp", "a2j".
+    kind — "carla-main" | "carla-child" | "looper-engine" | "looper-mcp" | "a2j".
+    node — owning graph node name for carla-child units (else None).
+    """
+
+    name: str
+    kind: str
+    node: Optional[str] = None
 
 
 class RigGraph:
@@ -76,6 +113,7 @@ class RigGraph:
         """Create an empty rig graph."""
         self.nodes: dict[str, Node] = {}
         self.edges: List[Edge] = []
+        self.runtime_units: dict[str, RuntimeUnit] = {}
 
     # ------------------------------------------------------------------
     # Node operations
@@ -85,8 +123,11 @@ class RigGraph:
         """Add *node* to the graph.
 
         Raises:
-            ValueError: if a node with the same name already exists.
+            ValueError: if a node with the same name already exists, or if
+                        node.kind is not a recognized node kind.
         """
+        if node.kind not in NODE_KINDS:
+            raise ValueError(f"Unknown node kind '{node.kind}' for node '{node.name}'")
         if node.name in self.nodes:
             raise ValueError(f"Node '{node.name}' already exists")
         self.nodes[node.name] = node
@@ -120,23 +161,44 @@ class RigGraph:
     # Edge operations
     # ------------------------------------------------------------------
 
-    def add_edge(self, src: str, dst: str, gain_db: float = 0.0) -> None:
+    def add_edge(
+        self,
+        src: str,
+        dst: str,
+        gain_db: float = 0.0,
+        kind: str = "audio",
+        src_port: Optional[str] = None,
+        dst_port: Optional[str] = None,
+    ) -> None:
         """Add (or update) an edge from *src* to *dst*.
 
-        If the edge already exists its gain_db is replaced (idempotent).
+        Uniqueness key is (src, dst, src_port, dst_port): node-level edges
+        stay unique per node pair; explicit-port edges are unique per port
+        pair, so a stereo lift can record two edges between the same nodes.
 
         Raises:
-            KeyError: if either node does not exist.
+            KeyError:   if either node does not exist.
+            ValueError: if *kind* is not a valid edge kind.
         """
+        if kind not in EDGE_KINDS:
+            raise ValueError(f"Unknown edge kind '{kind}'")
         if src not in self.nodes:
             raise KeyError(f"Source node '{src}' not found")
         if dst not in self.nodes:
             raise KeyError(f"Destination node '{dst}' not found")
         for edge in self.edges:
-            if edge.src == src and edge.dst == dst:
+            if (edge.src, edge.dst, edge.src_port, edge.dst_port) == (src, dst, src_port, dst_port):
                 edge.gain_db = gain_db
+                edge.kind = kind
                 return
-        self.edges.append(Edge(src=src, dst=dst, gain_db=gain_db))
+        self.edges.append(
+            Edge(src=src, dst=dst, gain_db=gain_db, kind=kind,
+                 src_port=src_port, dst_port=dst_port)
+        )
+
+    def add_runtime_unit(self, unit: RuntimeUnit) -> None:
+        """Register (or replace) a runtime-unit expectation by name."""
+        self.runtime_units[unit.name] = unit
 
     def remove_edge(self, src: str, dst: str) -> None:
         """Remove the edge from *src* to *dst*.
