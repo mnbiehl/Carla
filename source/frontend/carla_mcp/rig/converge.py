@@ -387,3 +387,52 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
     issues = problems + notes
     verdict = "OK" if not issues else f"DEGRADED: {len(issues)} issues"
     return render_report(verdict, [("Problems", problems), ("Notes", notes)])
+
+
+# Stop order = reverse of UNIT_START_ORDER: carla-child -> carla-main ->
+# looper-mcp -> looper-engine -> a2j.  Kept as its own mapping (rather than
+# negating UNIT_START_ORDER) because a2j's start rank sits between
+# looper-mcp/looper-engine and carla-main, so a naive negation would stop
+# a2j too early instead of last.
+UNIT_STOP_ORDER = {
+    "carla-child": 0,
+    "carla-main": 1,
+    "looper-mcp": 2,
+    "looper-engine": 3,
+    "a2j": 4,
+}
+
+DEFAULT_STOP_UNITS = [
+    RuntimeUnit(name="carla:main", kind="carla-main"),
+    RuntimeUnit(name="looper:mcp", kind="looper-mcp"),
+    RuntimeUnit(name="looper:engine", kind="looper-engine"),
+    RuntimeUnit(name="a2j", kind="a2j"),
+]
+
+
+async def do_stop(graph: Optional[RigGraph], ops: RigOps) -> str:
+    """Tear the rig down (children -> main Carla -> looper MCP -> looper
+    engine -> a2j) and verify everything is actually dead."""
+    if graph is not None and graph.runtime_units:
+        units = list(graph.runtime_units.values())
+        verify_graph = graph
+    else:
+        units = list(DEFAULT_STOP_UNITS)
+        verify_graph = RigGraph()
+        for u in units:
+            verify_graph.add_runtime_unit(u)
+
+    notes: List[str] = []
+    stopped: List[str] = []
+    for unit in sorted(units, key=lambda u: (UNIT_STOP_ORDER.get(u.kind, 9), u.name)):
+        err = await ops.stop_unit(unit)
+        if err:
+            notes.append(f"stop {unit.name}: {err}")
+        else:
+            stopped.append(unit.name)
+
+    observed = await ops.observe(verify_graph)
+    survivors = [name for name, up in observed.unit_status.items() if up]
+    issues = notes + [f"still up after stop: {name}" for name in survivors]
+    verdict = "OK" if not issues else f"DEGRADED: {len(issues)} issues"
+    return render_report(verdict, [("Stopped", stopped), ("Issues", issues)])
