@@ -359,7 +359,7 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
         notes.append("looper not reachable; no looper state saved")
 
     if carla_project is None and looper_dir is None:
-        return f"FAILED: nothing to save (carla and looper both unreachable)"
+        return "FAILED: nothing to save (carla and looper both unreachable)"
 
     # Lift every live rig-space link not covered by graph edges.
     observed = await ops.observe(graph)

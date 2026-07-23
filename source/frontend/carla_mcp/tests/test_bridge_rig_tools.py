@@ -1,6 +1,7 @@
 """Tests for the bridge's thin rig tools and managed-mode process handling."""
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -143,3 +144,39 @@ class TestLooperStateUnwrap:
         ops = bridge_mod.BridgeOps()
         ops._looper.get_state = AsyncMock(side_effect=ConnectionError("down"))
         assert asyncio.run(ops.looper_get_state()) is None
+
+
+class TestGarbageLooperReply:
+    """A half-open socket can yield empty/garbage bytes; LooperClient's
+    json.loads(...) then raises json.JSONDecodeError (a ValueError). Per the
+    RigOps contract, expected failures must return error strings/None, never
+    raise."""
+
+    def test_looper_command_returns_error_string_on_json_decode_error(self):
+        ops = bridge_mod.BridgeOps()
+        ops._looper.send_command = AsyncMock(
+            side_effect=json.JSONDecodeError("Expecting value", "", 0))
+        result = asyncio.run(ops._looper_command({"LoadSession": "x"}))
+        assert isinstance(result, str)
+
+    def test_looper_get_state_none_on_json_decode_error(self):
+        ops = bridge_mod.BridgeOps()
+        ops._looper.get_state = AsyncMock(
+            side_effect=json.JSONDecodeError("Expecting value", "", 0))
+        assert asyncio.run(ops.looper_get_state()) is None
+
+    def test_observe_get_state_none_on_json_decode_error(self):
+        ops = bridge_mod.BridgeOps()
+        ops._looper.get_state = AsyncMock(
+            side_effect=json.JSONDecodeError("Expecting value", "", 0))
+        captured = {}
+
+        async def fake_rig_observe(units, **kwargs):
+            captured.update(kwargs)
+            return "OK"
+
+        with patch("carla_mcp.mcp_stdio_bridge.rig_observe", new=fake_rig_observe):
+            result = asyncio.run(ops.observe(None))
+        assert result == "OK"
+        # Exercise the actual closure passed to rig_observe: it must not raise.
+        assert asyncio.run(captured["looper_get_state"]()) is None

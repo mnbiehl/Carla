@@ -549,7 +549,7 @@ class BridgeOps(RigOps):
         async def _get_state():
             try:
                 return _unwrap_looper_state(await self._looper.get_state())
-            except ConnectionError:
+            except (ConnectionError, ValueError):
                 return None
 
         async def _get_handles():
@@ -665,7 +665,7 @@ class BridgeOps(RigOps):
     async def _looper_command(self, command) -> str | None:
         try:
             response = await self._looper.send_command(command)
-        except ConnectionError as e:
+        except (ConnectionError, ValueError) as e:
             return str(e)
         if isinstance(response, dict) and "error" in response:
             return str(response["error"])
@@ -680,7 +680,7 @@ class BridgeOps(RigOps):
     async def looper_get_state(self):
         try:
             return _unwrap_looper_state(await self._looper.get_state())
-        except ConnectionError:
+        except (ConnectionError, ValueError):
             return None
 
     async def set_looper_mutes(self, main_muted, all_muted):
