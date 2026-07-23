@@ -11,9 +11,9 @@ Carla process running system Python.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from carla_mcp.rig.graph import Node
+from carla_mcp.rig.graph import Node, RuntimeUnit
 
 
 @dataclass(frozen=True)
@@ -69,3 +69,55 @@ def loop_nodes_from_looper_state(state: Optional[dict]) -> List[Node]:
         )
     nodes.sort(key=lambda n: n.port_index)
     return nodes
+
+
+async def observe(
+    units: List["RuntimeUnit"],
+    *,
+    list_links: Callable[[], List[Tuple[str, str]]],
+    list_outputs: Callable[[], List[str]],
+    list_inputs: Callable[[], List[str]],
+    unit_probe: Callable[["RuntimeUnit"], bool],
+    looper_get_state: Optional[Callable[[], "Awaitable[Optional[dict]]"]] = None,
+    carla_handles: Optional[Callable[[], "Awaitable[Dict[str, Dict[str, str]]]"]] = None,
+) -> ObservedState:
+    """Gather a full ObservedState through injected collaborators.
+
+    Every probe is individually shielded: a failing collaborator yields an
+    empty/False observation (which the diff then reports), never an exception.
+    """
+    def _safe_list(fn: Callable[[], list]) -> list:
+        try:
+            return list(fn())
+        except Exception:  # noqa: BLE001 — observation must not raise
+            return []
+
+    status: Dict[str, bool] = {}
+    for unit in units:
+        try:
+            status[unit.name] = bool(unit_probe(unit))
+        except Exception:  # noqa: BLE001
+            status[unit.name] = False
+
+    looper_state = None
+    if looper_get_state is not None:
+        try:
+            looper_state = await looper_get_state()
+        except Exception:  # noqa: BLE001
+            looper_state = None
+
+    handles: Dict[str, Dict[str, str]] = {}
+    if carla_handles is not None:
+        try:
+            handles = dict(await carla_handles() or {})
+        except Exception:  # noqa: BLE001
+            handles = {}
+
+    return ObservedState(
+        links=[Link(s, d) for s, d in _safe_list(list_links)],
+        output_ports=_safe_list(list_outputs),
+        input_ports=_safe_list(list_inputs),
+        unit_status=status,
+        looper_state=looper_state,
+        instance_handles=handles,
+    )
