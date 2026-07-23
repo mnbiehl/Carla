@@ -327,7 +327,16 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
 
     state = await ops.looper_get_state()
     if state is not None:
-        for loop_node in loop_nodes_from_looper_state(state):
+        raw_loopers = (state or {}).get("loopers", []) or []
+        loop_nodes = loop_nodes_from_looper_state(state)
+        if len(loop_nodes) < len(raw_loopers):
+            for entry in raw_loopers:
+                if entry.get("port_index") is None:
+                    notes.append(
+                        f"looper id={entry.get('id')} has no port_index "
+                        "(pre-contract engine?); dropped from saved session"
+                    )
+        for loop_node in loop_nodes:
             if graph.has_node(loop_node.name):
                 existing = graph.nodes[loop_node.name]
                 existing.looper_id = loop_node.looper_id

@@ -118,6 +118,22 @@ class TestDoSave:
         report = asyncio.run(do_save("s", tmp_path / "s", DeadOps()))
         assert report.startswith("FAILED:")
 
+    def test_looper_without_port_index_is_named_not_silently_dropped(self, tmp_path):
+        class DegradedLooperOps(SaveFakeOps):
+            async def looper_get_state(self):
+                state = await super().looper_get_state()
+                state["loopers"].append(
+                    {"id": 99, "port_index": None, "mode": "Playing",
+                     "level_db": 0.0, "pan": 0.0, "input_source": None}
+                )
+                return state
+        sdir = tmp_path / "s"
+        report = asyncio.run(do_save("s", sdir, DegradedLooperOps()))
+        assert report.splitlines()[0].startswith("DEGRADED:"), report
+        assert "id=99" in report
+        sess = read_session(sdir)
+        assert sess.graph.get_node("loop:0").looper_id == 7
+
     def test_missing_referenced_file_degrades(self, tmp_path):
         class NoChainOps(SaveFakeOps):
             async def export_rig_state(self, chains_dir):
