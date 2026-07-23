@@ -11,14 +11,15 @@ stdlib-only: imported by the main Carla process (system Python).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import ObservedState, loop_nodes_from_looper_state
 from carla_mcp.rig.reconcile import (
-    Action, UNIT_START_ORDER, canonical_ports, diff, expand_edges,
-    in_rig_port_space, plan, render_report,
+    Action, LOOPER_MIDI_IN, UNIT_START_ORDER, canonical_ports, diff,
+    expand_edges, in_rig_port_space, plan, render_report,
 )
 from carla_mcp.rig.session import (
     LOOPER_PROJECT, RigSession, SessionError, read_session,
@@ -249,3 +250,131 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
         d = diff(graph, observed)
 
     return render_report(d.verdict, [("Issues", d.issues()), ("Notes", notes)])
+
+
+_LOOP_PORT_RE = re.compile(r"^loopers:loop(\d+)_(in|out)_(l|r)$")
+
+
+def _graph_from_export(export: dict, graph: RigGraph, session_dir: Path,
+                       notes: List[str]) -> None:
+    """Lift a live export_rig_state dict into *graph* (v3 shapes).
+
+    Delegates to the migrator's rig_state lifter so live saves and legacy
+    migration can never disagree about node/edge lifting.
+    """
+    from carla_mcp.rig.session import _lift_rig_state
+    _lift_rig_state(export, graph, session_dir, notes)
+    for err in export.get("errors", []):
+        notes.append(f"carla export: {err}")
+
+
+def _lift_link(graph: RigGraph, src: str, dst: str, notes: List[str]) -> None:
+    """Record one uncovered live rig-space link as an explicit-port edge."""
+    from carla_mcp.rig.observe import is_midi_port
+
+    def _node_for(port: str) -> str:
+        m = _LOOP_PORT_RE.match(port)
+        if m:
+            name = f"loop:{m.group(1)}"
+            if not graph.has_node(name):
+                graph.add_node(Node(name=name, kind="loop",
+                                    port_index=int(m.group(1))))
+            return name
+        if port == LOOPER_MIDI_IN:
+            if not graph.has_node("app:looper"):
+                graph.add_node(Node(name="app:looper", kind="app"))
+            return "app:looper"
+        client = port.split(":", 1)[0]
+        for node in graph.nodes.values():
+            if node.kind in ("track", "bus") and node.jack_client == client:
+                return node.name
+        if port.startswith("a2j:"):
+            name = "midi:pacer" if "acer" in port else f"midi:{client}"
+            if not graph.has_node(name):
+                graph.add_node(Node(name=name, kind="midi",
+                                    port_pattern=re.escape(port)))
+            graph.add_runtime_unit(RuntimeUnit(name="a2j", kind="a2j"))
+            return name
+        if not graph.has_node(port):
+            graph.add_node(Node(name=port, kind="endpoint", jack_client=port))
+        return port
+
+    kind = "midi" if (is_midi_port(src) or is_midi_port(dst)) else "audio"
+    src_node = _node_for(src)
+    dst_node = _node_for(dst)
+    graph.add_edge(src_node, dst_node, kind=kind, src_port=src, dst_port=dst)
+
+
+async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
+    """Capture the live rig as a v3 session and verify the written output."""
+    notes: List[str] = []
+    session_dir.mkdir(parents=True, exist_ok=True)
+    graph = RigGraph()
+    carla_project: Optional[str] = None
+    looper_dir: Optional[str] = None
+
+    export = await ops.export_rig_state(str(session_dir / "chains"))
+    if export is not None:
+        _graph_from_export(export, graph, session_dir, notes)
+        err = await ops.save_carla_project(str(session_dir / "carla_project.carxp"))
+        if err is None:
+            carla_project = "carla_project.carxp"
+        else:
+            notes.append(f"carla project save: {err}")
+        graph.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
+    else:
+        notes.append("carla not reachable; no Carla state saved")
+
+    state = await ops.looper_get_state()
+    if state is not None:
+        for loop_node in loop_nodes_from_looper_state(state):
+            if graph.has_node(loop_node.name):
+                existing = graph.nodes[loop_node.name]
+                existing.looper_id = loop_node.looper_id
+                existing.port_index = loop_node.port_index
+            else:
+                graph.add_node(loop_node)
+        if not graph.has_node("app:looper"):
+            graph.add_node(Node(name="app:looper", kind="app"))
+        app = graph.nodes["app:looper"]
+        app.main_muted = bool(state.get("main_muted", False))
+        app.all_muted = bool(state.get("all_muted", False))
+        graph.add_runtime_unit(RuntimeUnit(name="looper:engine", kind="looper-engine"))
+        graph.add_runtime_unit(RuntimeUnit(name="looper:mcp", kind="looper-mcp"))
+        err = await ops.looper_save_session_at(str(session_dir / "looper"))
+        if err is None:
+            looper_dir = "looper"
+        else:
+            notes.append(f"looper session save: {err}")
+    else:
+        notes.append("looper not reachable; no looper state saved")
+
+    if carla_project is None and looper_dir is None:
+        return f"FAILED: nothing to save (carla and looper both unreachable)"
+
+    # Lift every live rig-space link not covered by graph edges.
+    observed = await ops.observe(graph)
+    expansion = expand_edges(graph, observed.output_ports, observed.input_ports)
+    covered = {(p.src, p.dst) for p in expansion.pairs}
+    for link in observed.links:
+        if (link.src, link.dst) in covered:
+            continue
+        if not in_rig_port_space(link.src, link.dst):
+            continue
+        _lift_link(graph, link.src, link.dst, notes)
+
+    sess = RigSession(name=name, graph=graph, carla_project=carla_project,
+                      looper_session_dir=looper_dir)
+    write_session(sess, session_dir)
+
+    # Self-verify: the file we just wrote must read back and reference only
+    # files that actually exist.
+    try:
+        reread = read_session(session_dir)
+    except SessionError as exc:
+        return render_report(f"FAILED: saved session does not re-read: {exc}",
+                             [("Notes", notes)])
+    problems = verify_session_files(reread, session_dir)
+    issues = problems + notes
+    verdict = "OK" if not issues else f"DEGRADED: {len(issues)} issues"
+    return render_report(verdict, [("Problems", problems), ("Notes", notes)])
