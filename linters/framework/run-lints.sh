@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-lints.sh — Entry point for the reins linter framework.
+# run-lints.sh — Entry point for the Reinicorn linter framework.
 #
 # Discovers lint rules in rules/, reads .lint-config.json for active rules
 # and severity, runs each active rule, and reports results.

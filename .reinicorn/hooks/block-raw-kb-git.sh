@@ -2,7 +2,7 @@
 # block-raw-kb-git.sh — PreToolUse hook for shell tools
 #
 # Blocks agents from running git commands directly inside the kb/
-# submodule directory. This surfaces reins CLI failures instead of
+# submodule directory. This surfaces Reinicorn CLI failures instead of
 # letting agents silently work around them.
 #
 # Gating is presence-based, not tool-name-based: editors name their
@@ -12,7 +12,7 @@
 # and no-op otherwise. This stays portable across editors and cannot
 # fail open on an unrecognized tool name.
 #
-# Allowed: reins kb publish, reins kb sync, reins kb git
+# Allowed: uv run rcorn kb publish, uv run rcorn kb sync, uv run rcorn kb git
 # Blocked: cd kb && git ..., git -C kb/ ...
 #
 # Exit 0 = allow, Exit 2 = block
@@ -24,11 +24,6 @@ INPUT=$(cat)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty')
 [ -z "$CMD" ] && exit 0
 
-# Allow reins commands (including kb git)
-case "$CMD" in
-  *reins*) exit 0 ;;
-esac
-
 # Block: cd kb && git ... or cd kb; git ...
 # Block: git -C kb ...
 # Block: git -C ./kb ...
@@ -36,10 +31,10 @@ esac
 if echo "$CMD" | grep -qP '((cd|pushd)\s+(\./)?kb[/\s;].*git\b|git\s+-C\s+(\./)?kb)'; then
   echo "Blocked: direct git commands in the kb directory." >&2
   echo "" >&2
-  echo "Use reins CLI instead:" >&2
-  echo "  reins kb publish      — push kb changes" >&2
-  echo "  reins kb sync         — pull kb changes" >&2
-  echo "  reins kb git …        — escape hatch for raw git" >&2
+  echo "Use Reinicorn CLI instead:" >&2
+  echo "  uv run rcorn kb publish      — push kb changes" >&2
+  echo "  uv run rcorn kb sync         — pull kb changes" >&2
+  echo "  uv run rcorn kb git …        — escape hatch for raw git" >&2
   exit 2
 fi
 

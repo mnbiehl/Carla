@@ -2,7 +2,7 @@
 # lint-shellcheck — Lint rule: scripts/shellcheck
 #
 # Runs shellcheck on all .sh files in the project, excluding vendored paths
-# (.git/, kb/ submodule, .reins/hooks/ copies, .venv/).
+# (.git/, kb/ submodule, .reinicorn/hooks/ copies, .venv/).
 #
 # Exit 0 if all scripts pass. Exit 1 if any issues found.
 
@@ -21,7 +21,7 @@ mapfile -t scripts < <(
   find "$PROJECT_ROOT" -name '*.sh' -type f \
     -not -path '*/.git/*' \
     -not -path '*/kb/*' \
-    -not -path '*/.reins/hooks/*' \
+    -not -path '*/.reinicorn/hooks/*' \
     -not -path '*/.venv/*' \
     | sort
 )

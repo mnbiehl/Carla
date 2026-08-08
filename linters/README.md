@@ -2,7 +2,7 @@
 
 ## What Is This?
 
-A stack-agnostic, discoverable lint rule framework for the reins kb. Each lint
+A stack-agnostic, discoverable lint rule framework for the Reinicorn kb. Each lint
 rule is a standalone shell script that checks one specific aspect of kb health.
 Rules are discovered automatically by scanning the `rules/` directory tree, configured
 via `.lint-config.json`, and run by a single entry-point script.

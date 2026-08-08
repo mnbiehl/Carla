@@ -1,6 +1,6 @@
 ---
 name: update-superpowers
-description: "Update forked superpowers skills from upstream plugin cache. Detects latest version, copies content, applies mechanical replacements, and reviews for reins-specific conventions."
+description: "Update forked superpowers skills from upstream plugin cache. Detects latest version, copies content, applies mechanical replacements, and reviews for Reinicorn-specific conventions."
 ---
 
 # Update Forked Superpowers Skills
@@ -12,7 +12,7 @@ Update forked skills from the upstream superpowers plugin cache, apply mechanica
 - **Plugin cache:** `~/.claude/plugins/cache/claude-plugins-official/superpowers/`
 - **Skills directory:** `.agents/skills/`
 - **Replacements config:** `.agents/skills/update-superpowers/replacements.yaml`
-- **Non-forked skills (skip these):** `using-reins`, `populate-agents-md`, `update-superpowers`
+- **Non-forked skills (skip these):** `using-reinicorn`, `populate-agents-md`, `update-superpowers`
 
 ## Step 1: Detect versions
 
@@ -32,7 +32,7 @@ Update forked skills from the upstream superpowers plugin cache, apply mechanica
 
 For each forked skill (not in the skip list):
 
-1. **Preserve local trailers.** Before overwriting, scan the local `SKILL.md` for the first line matching `^## Reins ` (heading starting with "Reins "). If found, capture everything from that line to EOF as the *local trailer*. These are reins-specific additions that must survive upstream updates (e.g. `## Reins Integration`, `## Reins PR Review`). `tests/test_skill_copy.py` asserts the presence of specific trailer headings — do not drop them.
+1. **Preserve local trailers.** Before overwriting, scan the local `SKILL.md` for the first line matching `^## Reinicorn ` (heading starting with "Reinicorn "). If found, capture everything from that line to EOF as the *local trailer*. These are Reinicorn-specific additions that must survive upstream updates (e.g. `## Reinicorn Integration`, `## Reinicorn PR Review`). `tests/test_skill_copy.py` asserts the presence of specific trailer headings — do not drop them.
 2. If the skill has content changes: copy the upstream `SKILL.md` content, replacing the local fork entirely.
 3. Read `.agents/skills/update-superpowers/replacements.yaml`. Sort entries by length of `find` descending (longest first).
 4. Apply each replacement as a literal string substitution across the file content.
@@ -44,9 +44,9 @@ For each forked skill (not in the skip list):
 Read each updated skill file and check for:
 
 - Any remaining `docs/superpowers/` references the replacements missed.
-- Paths that do not match reins kb conventions (`kb/<repo>/`).
+- Paths that do not match Reinicorn kb conventions (`kb/<repo>/`).
 - Structural changes worth flagging to the user (new sections, removed sections, changed gates).
-- **Trailer integrity:** if the pre-update file had `## Reins ` trailer section(s), verify they are still present post-update. Run `uv run pytest tests/test_skill_copy.py` as a sanity check — it asserts specific trailer headings exist in the installed package.
+- **Trailer integrity:** if the pre-update file had `## Reinicorn ` trailer section(s), verify they are still present post-update. Run `uv run pytest tests/test_skill_copy.py` as a sanity check — it asserts specific trailer headings exist in the installed package.
 
 If new replacements are needed, add them to `replacements.yaml` (maintaining longest-first order) and re-apply all replacements to affected files.
 

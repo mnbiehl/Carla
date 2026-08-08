@@ -1,24 +1,33 @@
 {
-  "reins_version": "0.1.1.dev153+g57804e7d6.d20260711",
-  "installed_at": "2026-07-11T18:40:17.075052+00:00",
+  "reinicorn_version": "0.1.dev50+gc8b5512b6.d20260808",
+  "installed_at": "2026-08-08T12:18:07.790046+00:00",
   "files": {
     ".agents/skills/ATTRIBUTION.md": {
-      "sha256": "875de8c21d44b71b9b8975b7d979bd335a9009cf5b18077b185c2c28b1b521f6"
+      "sha256": "58b28c9e02ab54b92b57b9191d45b41d382d9a80efdb6168ea90be89793f3f98"
     },
     ".agents/skills/audio-routing-workflow/SKILL.md": {
       "sha256": "c3c894091941b9eff2a0e19d6b65ea82434e4bad575724ace10426a4cd06e2e1"
     },
+    ".agents/skills/autofix/SKILL.md": {
+      "sha256": "09430a914debe143f646dd369b56c9bca27704c159aebf28c07e41f411046acf"
+    },
+    ".agents/skills/autofix/github.md": {
+      "sha256": "466780fcf8c883a5f30532956b5b08645691a79d6755c8a02cc879de14649aff"
+    },
     ".agents/skills/brainstorming/SKILL.md": {
-      "sha256": "b9a0a5091051339cf04cbc83c84286bfb3614022f0b1b5a18e6e513ac75c3489"
+      "sha256": "fca2c1944521de9736fdef3352f80922ae982b8ff71b2ba87e92ad3a8db347cc"
     },
     ".agents/skills/carla-effects-chains/SKILL.md": {
       "sha256": "79138e56c9d45162ac432522ef957ac37a59d6081eff919008fed4b5907c1443"
+    },
+    ".agents/skills/code-review/SKILL.md": {
+      "sha256": "18c9c3c69a6a58ae0b7baa5b19637eaa9aaf02c21b1242f0bb073dc24942fe0a"
     },
     ".agents/skills/dispatching-parallel-agents/SKILL.md": {
       "sha256": "c2890a0bdc95b209c53a5d7653d4fd5f9a13ea90e621a74b8aa7548505c99d04"
     },
     ".agents/skills/executing-plans/SKILL.md": {
-      "sha256": "f0178727bb008158de9036bad14f36d95d2196a37942d23c0cfb190107ebc684"
+      "sha256": "736dbd676e214032f6345d291707376bd5d59042455ba7b7a2d83c72545f6e09"
     },
     ".agents/skills/finishing-a-development-branch/SKILL.md": {
       "sha256": "efe060bc4cbdeabb372cf9170c79cf595795b932c3ac8d8702c4770ff14e96b2"
@@ -30,7 +39,7 @@
       "sha256": "07e67083d1a0e14bd4f2823c7efe51c4a5d6f88d44e280451c188f271afcd9af"
     },
     ".agents/skills/requesting-code-review/SKILL.md": {
-      "sha256": "2e6c34a336b1930a0ff0d5e446c7b3adfa7c8439181dfdaa08a0d9e9ade3154a"
+      "sha256": "4adf62136177d4bf49a94e25a63bc81372887b96fb777ae09f563388e4f58103"
     },
     ".agents/skills/requesting-code-review/code-reviewer.md": {
       "sha256": "7f5328dca12cb200005ae9d4386f63a9b0acb735ece57f82db206b4a3189ccae"
@@ -90,13 +99,19 @@
       "sha256": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283"
     },
     ".agents/skills/update-superpowers/SKILL.md": {
-      "sha256": "42b1557edd2999b5ddb42c4f53f01bf59a25a2dfcd860dfde529f1f02f5f1c87"
+      "sha256": "650e8759a02c1b1f46c93427a19ce13b4077c6629c5d7a10aa84d65c0fa3183e"
     },
     ".agents/skills/update-superpowers/replacements.yaml": {
-      "sha256": "cc1ebf905e06b43c3ed556f812a81b634484701ba12906a89888c6c83def847b"
+      "sha256": "b20ec8456d01ec149fda43250e5d8bdfcfd3a121f62b4d54f7bf9362cecec297"
     },
     ".agents/skills/using-git-worktrees/SKILL.md": {
-      "sha256": "f2ee6b56cb82a24a4a383aa5e7b500aa647a8421f17232c432e6af92660b3754"
+      "sha256": "17bec50e92499c8753352eb596a1a34e2a851702dcfda272aab36921a002e56f"
+    },
+    ".agents/skills/using-reinicorn/SKILL.md": {
+      "sha256": "e216098ee18b773cc10071586adc0c49b34fb026c3d30033d85ae69501e03d0d"
+    },
+    ".agents/skills/using-reinicorn/references/codex-tools.md": {
+      "sha256": "9310bb2315eed2c1cebea02cd1c9e8fe121cb788fc6b41e8b8f8b5ff46f85f37"
     },
     ".agents/skills/using-reins/SKILL.md": {
       "sha256": "6233e419dfe53579fdc0ce102014cd13c56a43820d566a8a2e02c30a270f2c8b"
@@ -108,7 +123,7 @@
       "sha256": "75940ef1c02c469a2206700b4c12274438f1a0b1bc903abff501663092a85f5b"
     },
     ".agents/skills/writing-plans/SKILL.md": {
-      "sha256": "a8a7be72a82aad95b63066688c29e13f8ef596251cfe404e6b72e1385e2508a1"
+      "sha256": "3fedd8c9d961ba342e7496a29fd5a324c803932ce3a3fae3ef1ecd74776965f1"
     },
     ".agents/skills/writing-skills/SKILL.md": {
       "sha256": "2aa349cb2564d12717b182ceeca3ff40a9f1254b390cf31c76e5374fb88850ab"
@@ -132,7 +147,7 @@
       "sha256": "0dba46de2d2640af8df1530692587a2b6896b249d74016ac9d8e06c74cd195c2"
     },
     ".claude/hooks/check-agents-md.sh": {
-      "sha256": "b49d0bd4bd9eb12747fd6c5f9f09310e0d3608a55027b9de73259d20343d0ec1"
+      "sha256": "abe726d4b5fe961986f22989b0147637471b2a69220a56c23c4e64b5cafc5a7e"
     },
     ".claude/hooks/post-checkout": {
       "sha256": "7eea5490e19095ddd98eecf80fa570a97e081eb851ceaa42b9deff7970027fb9"
@@ -144,10 +159,10 @@
       "sha256": "439621aa76df181d868ed447c7c2451fad38a892e06cf6549fc0ac9f2aa0667e"
     },
     "linters/.lint-config.json": {
-      "sha256": "cf63ae882577fb0c1df4fc45ea225e8142f7b87b3472f97303214447b6be4477"
+      "sha256": "1218d747b06054afc95f95960e6de48151d09a79a1d0f36082f118b76f37536c"
     },
     "linters/README.md": {
-      "sha256": "5739f00892e20cf51a5233262f14d3bc0623d7f11c10f0d1706a413707d6485d"
+      "sha256": "94642dcaf19427bbc63bd817dc85f61880a0768749350fbc7fc0677169778618"
     },
     "linters/ci-recovery/README.md": {
       "sha256": "7195219cc8a23bb2d77948eb7314057fa15d9c4065fa6213a317f601a409ff56"
@@ -177,7 +192,7 @@
       "sha256": "d75096eec373981664ab4eada1d2530fc62bc94ec3312435eef2ba8acf87233c"
     },
     "linters/framework/run-lints.sh": {
-      "sha256": "48a71c1335e448efd187051ccdf0a6924c2e9a9eb037d573989844a0bb532f22"
+      "sha256": "1d6899c3dc4e75a118aa39a0dfdbaedecb6707fce96a5a7afb115cbc912e35e9"
     },
     "linters/rules/kb/cross-links.sh": {
       "sha256": "72fc4935a14623642e21e3bc9343193eb2e55d668ab71392577ae76c6d0a97ce"
@@ -192,13 +207,10 @@
       "sha256": "f0043cb6be52d9a1eb0710dcb34689b0249ae0b3263a31375946b6959a77c9fd"
     },
     "linters/rules/scripts/shellcheck.sh": {
-      "sha256": "53374664bbf7a1064bd6df31fa7c28af2290686d6879fc2158ec402e451f8fcc"
+      "sha256": "fe6573d16fd4600817885220260b90f9d0f10fd98e4f7a365880a0c1035171f2"
     },
     "linters/structural-tests/.gitkeep": {
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "AGENTS.md": {
-      "sha256": "8dfba5abff30cf067b7386c329cb688c5097986ac5353033d524be7eae46e9bb"
     }
   }
 }

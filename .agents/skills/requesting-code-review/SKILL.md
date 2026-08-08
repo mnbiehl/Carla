@@ -103,9 +103,9 @@ You: [Fix progress indicators]
 
 See template at: [code-reviewer.md](code-reviewer.md)
 
-## Reins PR Review
+## Reinicorn PR Review
 
-When reviewing PRs in a reins-managed repo, add these checks to the standard review:
+When reviewing PRs in a Reinicorn-managed repo, add these checks to the standard review:
 
 ### Golden principles check
 

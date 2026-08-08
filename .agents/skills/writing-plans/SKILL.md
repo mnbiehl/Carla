@@ -174,14 +174,14 @@ After saving the plan, offer execution choice:
 - **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
 - Batch execution with checkpoints for review
 
-## Reins Integration
+## Reinicorn Integration
 
-When working in a reins-managed repo, use the CLI to create and publish plans:
+When working in a Reinicorn-managed repo, use the CLI to create and publish plans:
 
 ### Creating the plan file
 
 ```bash
-reins plan create
+rcorn plan create
 ```
 
 This handles branch detection, ticket ID extraction from the branch name,
@@ -190,20 +190,20 @@ detection with other active branches.
 
 ### Populating the plan
 
-After `reins plan create`, edit `kb/{repo}/exec-plans/active/{branch}/plan.md`
+After `rcorn plan create`, edit `kb/{repo}/exec-plans/active/{branch}/plan.md`
 to fill in Goal, Acceptance Criteria, Approach, and Tasks using the task structure
 defined above.
 
 ### Publishing
 
 ```bash
-reins kb publish
+rcorn kb publish
 ```
 
 ### Checking status
 
 ```bash
-reins plan status
+rcorn plan status
 ```
 
 ### Gated docs (review lane)
@@ -212,5 +212,5 @@ Before building a plan on a spec (or any gated doc), check its status. A path
 under `specs/drafts/` or a `**Status:** draft` / `**Status:** in-review` header
 means the spec is **not approved** — it may still change under review. Stop and
 ask the user for explicit confirmation before planning against an unapproved
-spec. `reins review status` lists open reviews; `reins kb lint` warns when a
+spec. `rcorn review status` lists open reviews; `rcorn kb lint` warns when a
 plan references a drafts-annex or in-review doc.

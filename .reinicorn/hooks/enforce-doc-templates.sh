@@ -2,7 +2,7 @@
 # enforce-doc-templates.sh — PreToolUse hook for Write|Edit
 #
 # Portable across Claude Code, VS Code Copilot, and Cursor.
-# Delegates to 'reins _check-path' so all protected path logic
+# Delegates to 'uv run rcorn _check-path' so all protected path logic
 # lives in Python (single source of truth).
 #
 # Exit 0 = allow, Exit 2 = block
@@ -40,5 +40,5 @@ case "$FILE" in
     ;;
 esac
 
-# Delegate to reins CLI (single source of truth for protected paths)
-reins _check-path "$FILE"
+# Delegate to Reinicorn CLI (single source of truth for protected paths)
+uv run rcorn _check-path "$FILE"

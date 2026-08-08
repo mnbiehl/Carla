@@ -3,12 +3,12 @@
 # to avoid partial matches.
 #
 # These handle known path/convention differences between superpowers
-# defaults and reins's kb structure.
+# defaults and Reinicorn's kb structure.
 
 replacements:
   # Specific full-path references (longest first)
   - find: "save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`"
-    replace: "save via `reins spec create \"<topic>\"`"
+    replace: "save via `rcorn spec create \"<topic>\"`"
     context: "brainstorming step 6 save instruction"
 
   - find: "docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md"
@@ -24,8 +24,8 @@ replacements:
     context: "writing-plans handoff message"
 
   - find: "../using-superpowers/references/"
-    replace: "../using-reins/references/"
-    context: "executing-plans platform tool refs pointer (reins vendors Codex only)"
+    replace: "../using-reinicorn/references/"
+    context: "executing-plans platform tool refs pointer (Reinicorn vendors Codex only)"
 
   - find: "docs/superpowers/plans/"
     replace: "kb/<repo>/exec-plans/active/"

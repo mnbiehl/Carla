@@ -1,7 +1,7 @@
 [submodule "source/native-plugins/external"]
 	path = source/native-plugins/external
 	url = https://github.com/falkTX/Carla-Plugins
-[submodule "harness"]
+[submodule "kb"]
 	path = kb
 	url = git@github.com:mnbiehl/roboloops-harness.git
 	branch = main
