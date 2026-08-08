@@ -1,0 +1,159 @@
+diff --git a/source/frontend/carla_mcp/mcp_stdio_bridge.py b/source/frontend/carla_mcp/mcp_stdio_bridge.py
+index 76bca6955..398ae33f0 100644
+--- a/source/frontend/carla_mcp/mcp_stdio_bridge.py
++++ b/source/frontend/carla_mcp/mcp_stdio_bridge.py
+@@ -542,21 +542,21 @@ class BridgeOps(RigOps):
+             client = f"CarlaChain_{unit.node}"
+             return f"{client}:audio-in1" in pw_link_list_inputs()
+         return False
+ 
+     async def observe(self, graph):
+         units = list(graph.runtime_units.values()) if graph is not None else []
+ 
+         async def _get_state():
+             try:
+                 return _unwrap_looper_state(await self._looper.get_state())
+-            except ConnectionError:
++            except (ConnectionError, ValueError):
+                 return None
+ 
+         async def _get_handles():
+             if not _is_carla_reachable():
+                 return {}
+             result = await _carla_call("rig_handles", {})
+             if isinstance(result, dict):
+                 return result.get("nodes", {})
+             return {}
+ 
+@@ -658,36 +658,36 @@ class BridgeOps(RigOps):
+             result = await _carla_call("export_rig_state", {"chains_dir": chains_dir})
+             return result if isinstance(result, dict) else None
+         except Exception:  # noqa: BLE001
+             return None
+ 
+     # ----- looper payload -------------------------------------------------
+ 
+     async def _looper_command(self, command) -> str | None:
+         try:
+             response = await self._looper.send_command(command)
+-        except ConnectionError as e:
++        except (ConnectionError, ValueError) as e:
+             return str(e)
+         if isinstance(response, dict) and "error" in response:
+             return str(response["error"])
+         return None
+ 
+     async def load_looper_session(self, project_path):
+         return await self._looper_command({"LoadSession": project_path})
+ 
+     async def looper_save_session_at(self, dir_path):
+         return await self._looper_command({"SaveSessionAt": dir_path})
+ 
+     async def looper_get_state(self):
+         try:
+             return _unwrap_looper_state(await self._looper.get_state())
+-        except ConnectionError:
++        except (ConnectionError, ValueError):
+             return None
+ 
+     async def set_looper_mutes(self, main_muted, all_muted):
+         err = await self._looper_command({"SetMainOutputMute": main_muted})
+         if err:
+             return err
+         return await self._looper_command({"SetAllOutputsMute": all_muted})
+ 
+ 
+ @bridge.tool()
+diff --git a/source/frontend/carla_mcp/rig/converge.py b/source/frontend/carla_mcp/rig/converge.py
+index dfb30343a..b394ffc72 100644
+--- a/source/frontend/carla_mcp/rig/converge.py
++++ b/source/frontend/carla_mcp/rig/converge.py
+@@ -352,21 +352,21 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
+         graph.add_runtime_unit(RuntimeUnit(name="looper:mcp", kind="looper-mcp"))
+         err = await ops.looper_save_session_at(str(session_dir / "looper"))
+         if err is None:
+             looper_dir = "looper"
+         else:
+             notes.append(f"looper session save: {err}")
+     else:
+         notes.append("looper not reachable; no looper state saved")
+ 
+     if carla_project is None and looper_dir is None:
+-        return f"FAILED: nothing to save (carla and looper both unreachable)"
++        return "FAILED: nothing to save (carla and looper both unreachable)"
+ 
+     # Lift every live rig-space link not covered by graph edges.
+     observed = await ops.observe(graph)
+     expansion = expand_edges(graph, observed.output_ports, observed.input_ports)
+     covered = {(p.src, p.dst) for p in expansion.pairs}
+     for link in observed.links:
+         if (link.src, link.dst) in covered:
+             continue
+         if not in_rig_port_space(link.src, link.dst):
+             continue
+diff --git a/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py b/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py
+index 7d27a188d..2cc57bec3 100644
+--- a/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py
++++ b/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py
+@@ -1,13 +1,14 @@
+ """Tests for the bridge's thin rig tools and managed-mode process handling."""
+ 
+ import asyncio
++import json
+ from pathlib import Path
+ from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import carla_mcp.mcp_stdio_bridge as bridge_mod
+ 
+ 
+ class TestManagedLooperLaunch:
+     @patch("carla_mcp.mcp_stdio_bridge.subprocess.Popen")
+     @patch("carla_mcp.mcp_stdio_bridge._is_looper_reachable", return_value=False)
+     def test_engine_launched_with_managed_flag(self, _reach, mock_popen):
+@@ -136,10 +137,46 @@ class TestLooperStateUnwrap:
+         ops = bridge_mod.BridgeOps()
+         raw = {"main_muted": False, "loopers": []}
+         ops._looper.get_state = AsyncMock(return_value=raw)
+         state = asyncio.run(ops.looper_get_state())
+         assert state == raw
+ 
+     def test_looper_get_state_none_on_connection_error(self):
+         ops = bridge_mod.BridgeOps()
+         ops._looper.get_state = AsyncMock(side_effect=ConnectionError("down"))
+         assert asyncio.run(ops.looper_get_state()) is None
++
++
++class TestGarbageLooperReply:
++    """A half-open socket can yield empty/garbage bytes; LooperClient's
++    json.loads(...) then raises json.JSONDecodeError (a ValueError). Per the
++    RigOps contract, expected failures must return error strings/None, never
++    raise."""
++
++    def test_looper_command_returns_error_string_on_json_decode_error(self):
++        ops = bridge_mod.BridgeOps()
++        ops._looper.send_command = AsyncMock(
++            side_effect=json.JSONDecodeError("Expecting value", "", 0))
++        result = asyncio.run(ops._looper_command({"LoadSession": "x"}))
++        assert isinstance(result, str)
++
++    def test_looper_get_state_none_on_json_decode_error(self):
++        ops = bridge_mod.BridgeOps()
++        ops._looper.get_state = AsyncMock(
++            side_effect=json.JSONDecodeError("Expecting value", "", 0))
++        assert asyncio.run(ops.looper_get_state()) is None
++
++    def test_observe_get_state_none_on_json_decode_error(self):
++        ops = bridge_mod.BridgeOps()
++        ops._looper.get_state = AsyncMock(
++            side_effect=json.JSONDecodeError("Expecting value", "", 0))
++        captured = {}
++
++        async def fake_rig_observe(units, **kwargs):
++            captured.update(kwargs)
++            return "OK"
++
++        with patch("carla_mcp.mcp_stdio_bridge.rig_observe", new=fake_rig_observe):
++            result = asyncio.run(ops.observe(None))
++        assert result == "OK"
++        # Exercise the actual closure passed to rig_observe: it must not raise.
++        assert asyncio.run(captured["looper_get_state"]()) is None

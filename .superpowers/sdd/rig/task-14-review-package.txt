@@ -1,0 +1,1156 @@
+=== COMMITS 59a8e23a5..c5f26038e ===
+c5f26038e feat(bridge): reconciler-backed rig tools, managed looper, a2j lifecycle
+
+=== DIFFSTAT ===
+ source/frontend/carla_mcp/mcp_stdio_bridge.py      | 531 +++++++++++++--------
+ .../carla_mcp/tests/test_bridge_rig_tools.py       | 145 ++++++
+ .../carla_mcp/tests/test_load_rig_routing.py       |  54 ---
+ .../carla_mcp/tests/test_rig_routing_roundtrip.py  | 186 --------
+ .../frontend/carla_mcp/tests/test_rig_session.py   |  27 --
+ 5 files changed, 482 insertions(+), 461 deletions(-)
+
+=== FULL DIFF (U10) ===
+diff --git a/source/frontend/carla_mcp/mcp_stdio_bridge.py b/source/frontend/carla_mcp/mcp_stdio_bridge.py
+index 1207d0f16..76bca6955 100644
+--- a/source/frontend/carla_mcp/mcp_stdio_bridge.py
++++ b/source/frontend/carla_mcp/mcp_stdio_bridge.py
+@@ -22,66 +22,57 @@ Usage in .mcp.json:
+     }
+ }
+ """
+ 
+ import asyncio
+ import atexit
+ import json
+ import os
+ import sys
+ import subprocess
++import time
+ from pathlib import Path
+ 
+ from fastmcp import FastMCP
+ from mcp.client.sse import sse_client
+ from mcp import ClientSession
+ 
+ from carla_mcp.tool_proxy import discover_and_register, unregister_all
+ from carla_mcp.orchestration.jack_router import JackRouter
++from carla_mcp.rig.converge import (
++    RigOps, do_load, do_routing_reset, do_save, do_stop, do_verify,
++)
++from carla_mcp.rig.graph import RigGraph
++from carla_mcp.rig.observe import observe as rig_observe
++from carla_mcp.rig.session import SessionError, read_session
++from carla_mcp.utils.pw_link import (
++    pw_link_connect, pw_link_disconnect, pw_link_list_inputs, pw_link_list_outputs,
++)
++from looper_mcp.looper_client import LooperClient
+ 
+ CARLA_PORT = os.getenv("CARLA_MCP_PORT", "3001")
+ CARLA_HOST = os.getenv("CARLA_MCP_HOST", "127.0.0.1")
+ CARLA_SSE_URL = f"http://{CARLA_HOST}:{CARLA_PORT}/sse"
+ 
+ # Path constants
+ _THIS_DIR = Path(__file__).resolve().parent
+ CARLA_FRONTEND_DIR = _THIS_DIR.parent
+ 
+ # Looper MCP server configuration
+ LOOPER_MCP_PORT = os.getenv("LOOPER_MCP_PORT", "3002")
+ LOOPER_MCP_HOST = os.getenv("LOOPER_MCP_HOST", "127.0.0.1")
+ LOOPER_SSE_URL = f"http://{LOOPER_MCP_HOST}:{LOOPER_MCP_PORT}/sse"
+ LOOPER_MCP_SCRIPT = _THIS_DIR.parent / "looper_mcp" / "main.py"
+ 
+ RIG_SESSION_DIR = Path.home() / ".config" / "rig-sessions"
+ 
+ 
+-def _build_rig_manifest(
+-    carla_running: bool,
+-    looper_running: bool,
+-    carla_session: str = "",
+-    looper_session: str = "",
+-    routing: list = None,
+-) -> dict:
+-    # version 2 adds the "routing" key: a list of [source, dest] pw-link pairs
+-    # captured live at save time so non-standard external routing survives a
+-    # save/load round-trip. v1 manifests (no "routing" key) still load.
+-    return {
+-        "version": 2,
+-        "backends": {
+-            "carla": {"running": carla_running, "session": carla_session},
+-            "looper": {"running": looper_running, "session": looper_session},
+-        },
+-        "routing": [list(c) for c in routing] if routing else [],
+-    }
+-
+-
+ def _tool_result_json(result) -> dict | None:
+     """Extract and JSON-parse the text payload of an MCP tool call result.
+ 
+     Tools that return a dict are delivered as one or more TextContent parts
+     holding JSON.  Returns the parsed object, or None if nothing parses.
+     """
+     parts = []
+     for content in getattr(result, "content", None) or []:
+         text = getattr(content, "text", None)
+         if text is not None:
+@@ -105,20 +96,29 @@ _carla_log_file = None
+ LOOPERS_PATH = os.getenv("LOOPERS_PATH", str(Path(__file__).resolve().parent.parent.parent.parent.parent / "looperdooper" / "target" / "release" / "loopers"))
+ 
+ # Track the Looper MCP process we launched
+ _looper_process: subprocess.Popen | None = None
+ _looper_log_file = None
+ 
+ # Track the Looper engine process (Rust binary)
+ _looper_engine_process: subprocess.Popen | None = None
+ _looper_engine_log_file = None
+ 
++# Track the a2jmidid process (managed mode: the bridge owns a2j's lifecycle)
++_a2j_process: subprocess.Popen | None = None
++_a2j_log_file = None
++
++# Desired graph of the last loaded/saved session (verify_rig's default target)
++_current_graph: RigGraph | None = None
++
++LOOPER_JSON_PORT = int(os.getenv("LOOPER_JSON_PORT", "8088"))
++
+ 
+ def _is_carla_running() -> bool:
+     """Check if our managed Carla process is running."""
+     global _carla_process
+     if _carla_process is not None:
+         if _carla_process.poll() is None:
+             return True
+         _carla_process = None
+     return False
+ 
+@@ -278,24 +278,26 @@ async def _start_looper() -> str:
+     global _looper_engine_process, _looper_engine_log_file
+ 
+     if _is_looper_running() or _is_looper_reachable():
+         count = await discover_and_register(bridge, LOOPER_SSE_URL, prefix="looper")
+         src = f"managed (PID {_looper_process.pid})" if _is_looper_running() else "external"
+         return f"Looper is already running ({src}). {count} tools registered."
+ 
+     env = os.environ.copy()
+     env["LOOPER_MCP_PORT"] = str(LOOPER_MCP_PORT)
+ 
+-    # Step 1: Launch the loopers audio engine via pw-jack
++    # Step 1: Launch the loopers audio engine via pw-jack in managed mode:
++    # the bridge/rig graph is the only writer of connections (no self-wiring,
++    # no MIDI auto-connect, no a2jmidid autostart in the engine).
+     _looper_engine_log_file = open("/tmp/looper-engine.log", "w")
+     _looper_engine_process = subprocess.Popen(
+-        ["pw-jack", LOOPERS_PATH],
++        ["pw-jack", LOOPERS_PATH, "--managed"],
+         env=env,
+         stdout=_looper_engine_log_file,
+         stderr=_looper_engine_log_file,
+     )
+ 
+     # Poll for JACK ports to appear (1s interval, 10s timeout)
+     engine_ready = False
+     for _ in range(10):
+         await asyncio.sleep(1)
+         if _looper_engine_process.poll() is not None:
+@@ -393,20 +395,75 @@ async def _stop_looper() -> str:
+         _looper_engine_process = None
+         messages.append("No managed Looper engine process to stop.")
+ 
+     if _looper_engine_log_file is not None:
+         _looper_engine_log_file.close()
+         _looper_engine_log_file = None
+ 
+     return " ".join(messages)
+ 
+ 
++def _is_a2j_running() -> bool:
++    """True if our managed a2jmidid is alive, or an external one is running."""
++    global _a2j_process
++    if _a2j_process is not None:
++        if _a2j_process.poll() is None:
++            return True
++        _a2j_process = None
++    try:
++        return subprocess.run(
++            ["pgrep", "-x", "a2jmidid"], capture_output=True, timeout=3
++        ).returncode == 0
++    except (subprocess.TimeoutExpired, FileNotFoundError):
++        return False
++
++
++def _start_a2j() -> str | None:
++    """Start a2jmidid (managed). Returns None on success, error string on failure."""
++    global _a2j_process, _a2j_log_file
++    if _is_a2j_running():
++        return None
++    try:
++        _a2j_log_file = open("/tmp/a2jmidid.log", "w")
++        _a2j_process = subprocess.Popen(
++            ["a2jmidid", "-e"],
++            stdout=_a2j_log_file,
++            stderr=_a2j_log_file,
++        )
++    except FileNotFoundError:
++        return "a2jmidid not installed"
++    except Exception as e:  # noqa: BLE001 — report, don't raise into tool
++        return f"failed to start a2jmidid: {e}"
++    return None
++
++
++def _stop_a2j() -> str | None:
++    """Stop the managed a2jmidid. External instances are reported, not killed."""
++    global _a2j_process, _a2j_log_file
++    if _a2j_process is not None and _a2j_process.poll() is None:
++        _a2j_process.terminate()
++        try:
++            _a2j_process.wait(timeout=5)
++        except subprocess.TimeoutExpired:
++            _a2j_process.kill()
++            _a2j_process.wait()
++        _a2j_process = None
++        if _a2j_log_file is not None:
++            _a2j_log_file.close()
++            _a2j_log_file = None
++        return None
++    _a2j_process = None
++    if _is_a2j_running():
++        return "a2jmidid running but not managed by the bridge; left alone"
++    return None
++
++
+ @bridge.tool()
+ async def looper_start() -> str:
+     """Start the looper system (Looper MCP server + looperdooper)."""
+     return await _start_looper()
+ 
+ 
+ @bridge.tool()
+ async def looper_stop() -> str:
+     """Stop the looper system."""
+     return await _stop_looper()
+@@ -434,211 +491,284 @@ def _looper_status_message() -> str:
+     else:
+         return "Looper is not running. Use looper_start to launch it."
+ 
+ 
+ @bridge.tool()
+ async def looper_status() -> str:
+     """Check if the looper system is running and its MCP server is reachable."""
+     return _looper_status_message()
+ 
+ 
+-@bridge.tool()
+-async def save_rig_session(name: str) -> str:
+-    """Save the full rig session (Carla + looper state + routing manifest)."""
+-    session_dir = RIG_SESSION_DIR / name
+-    session_dir.mkdir(parents=True, exist_ok=True)
++async def _carla_call(tool: str, args: dict) -> dict | str | None:
++    """One SSE round-trip to the main Carla MCP server; returns parsed JSON
++    dict when the tool returned JSON, else the raw text, else None."""
++    async with sse_client(CARLA_SSE_URL) as (r, w):
++        async with ClientSession(r, w) as session:
++            await session.initialize()
++            result = await session.call_tool(tool, args)
++    parsed = _tool_result_json(result)
++    if parsed is not None:
++        return parsed
++    parts = [getattr(c, "text", "") or "" for c in getattr(result, "content", []) or []]
++    return "".join(parts).strip() or None
++
++
++def _unwrap_looper_state(reply: dict | None) -> dict | None:
++    """The Rust remote nests GetState under a "state" key; do_save/observe read
++    main_muted/loopers at the top level, so peel one "state" envelope."""
++    if isinstance(reply, dict) and "state" in reply and isinstance(reply["state"], dict):
++        return reply["state"]
++    return reply
++
++
++class BridgeOps(RigOps):
++    """Production RigOps: pw-link + SSE-to-Carla + looper TCP + Popen probes."""
++
++    def __init__(self) -> None:
++        self._router = JackRouter()
++        self._looper = LooperClient(port=LOOPER_JSON_PORT)
++
++    # ----- observation -------------------------------------------------
++
++    def _unit_probe(self, unit) -> bool:
++        if unit.kind == "carla-main":
++            return _is_carla_reachable()
++        if unit.kind == "looper-mcp":
++            return _is_looper_reachable()
++        if unit.kind == "looper-engine":
++            return any(p.startswith("loopers:") for p in pw_link_list_outputs())
++        if unit.kind == "a2j":
++            return _is_a2j_running()
++        if unit.kind == "carla-child":
++            client = f"CarlaChain_{unit.node}"
++            return f"{client}:audio-in1" in pw_link_list_inputs()
++        return False
+ 
+-    messages = []
++    async def observe(self, graph):
++        units = list(graph.runtime_units.values()) if graph is not None else []
++
++        async def _get_state():
++            try:
++                return _unwrap_looper_state(await self._looper.get_state())
++            except ConnectionError:
++                return None
++
++        async def _get_handles():
++            if not _is_carla_reachable():
++                return {}
++            result = await _carla_call("rig_handles", {})
++            if isinstance(result, dict):
++                return result.get("nodes", {})
++            return {}
++
++        return await rig_observe(
++            units,
++            list_links=self._router.list_connections,
++            list_outputs=pw_link_list_outputs,
++            list_inputs=pw_link_list_inputs,
++            unit_probe=self._unit_probe,
++            looper_get_state=_get_state,
++            carla_handles=_get_handles,
++        )
++
++    # ----- processes ----------------------------------------------------
++
++    async def start_unit(self, unit):
++        if unit.kind in ("looper-engine", "looper-mcp"):
++            message = await _start_looper()
++            return None if "exited" not in message else message
++        if unit.kind == "carla-main":
++            message = await _start_carla()
++            return None if "exited" not in message else message
++        if unit.kind == "a2j":
++            return _start_a2j()
++        if unit.kind == "carla-child":
++            return None  # respawned by import_rig_state during converge
++        return f"unknown unit kind: {unit.kind}"
++
++    async def stop_unit(self, unit):
++        if unit.kind == "carla-child":
++            if not _is_carla_reachable():
++                return None
++            try:
++                result = await _carla_call("remove_node", {"name": unit.node})
++            except Exception as e:  # noqa: BLE001
++                return f"remove_node failed: {e}"
++            if isinstance(result, dict) and not result.get("success", True):
++                return result.get("message", "remove_node failed")
++            return None
++        if unit.kind == "carla-main":
++            await _stop_carla()
++            return None
++        if unit.kind in ("looper-mcp", "looper-engine"):
++            await _stop_looper()
++            return None
++        if unit.kind == "a2j":
++            return _stop_a2j()
++        return f"unknown unit kind: {unit.kind}"
++
++    # ----- connections ---------------------------------------------------
++
++    def connect(self, src, dst):
++        result = pw_link_connect(src, dst)
++        return None if result.success else (result.message or "pw-link failed")
++
++    def disconnect(self, src, dst):
++        result = pw_link_disconnect(src, dst)
++        return None if result.success else (result.message or "pw-link failed")
+ 
+-    # Save Carla project if running
+-    carla_session = ""
+-    if _is_carla_reachable():
+-        carla_path = str(session_dir / "carla_project.carxp")
++    def wait_ports(self, ports, timeout_s=15.0):
++        deadline = time.monotonic() + timeout_s
++        missing = list(ports)
++        while missing and time.monotonic() < deadline:
++            live = set(pw_link_list_outputs()) | set(pw_link_list_inputs())
++            missing = [p for p in missing if p not in live]
++            if missing:
++                time.sleep(0.5)
++        return missing
++
++    # ----- Carla payload ---------------------------------------------------
++
++    async def load_carla_project(self, path):
+         try:
+-            async with sse_client(CARLA_SSE_URL) as (r, w):
+-                async with ClientSession(r, w) as session:
+-                    await session.initialize()
+-                    await session.call_tool("save_project", {"filename": carla_path})
+-            carla_session = carla_path
+-            messages.append(f"Carla session saved to {carla_path}")
+-        except Exception as e:
+-            messages.append(f"Failed to save Carla session: {e}")
+-
+-        # Serialize the process-per-track rig graph (each child instance's
+-        # chain + routing). The main project above does NOT capture child
+-        # instance plugins, so without this the per-track chains are lost.
+-        chains_dir = str(session_dir / "chains")
++            await _carla_call("load_project", {"filename": path})
++            return None
++        except Exception as e:  # noqa: BLE001
++            return str(e)
++
++    async def save_carla_project(self, path):
+         try:
+-            async with sse_client(CARLA_SSE_URL) as (r, w):
+-                async with ClientSession(r, w) as session:
+-                    await session.initialize()
+-                    result = await session.call_tool(
+-                        "export_rig_state", {"chains_dir": chains_dir}
+-                    )
+-            rig_state = _tool_result_json(result)
+-            if rig_state is not None:
+-                (session_dir / "rig_state.json").write_text(
+-                    json.dumps(rig_state, indent=2)
+-                )
+-                n_tracks = sum(
+-                    1 for n in rig_state.get("nodes", [])
+-                    if n.get("kind") in ("track", "bus")
+-                )
+-                messages.append(f"Rig graph saved ({n_tracks} track/bus chains)")
+-                for err in rig_state.get("errors", []):
+-                    messages.append(f"  ⚠ {err}")
+-            else:
+-                messages.append("Failed to serialize rig graph (no result)")
+-        except Exception as e:
+-            messages.append(f"Failed to save rig graph: {e}")
+-
+-    # Save looper session if running
+-    looper_session = ""
+-    if _is_looper_reachable():
+-        looper_path = str(session_dir / "looper_session.json")
++            await _carla_call("save_project", {"filename": path})
++            return None
++        except Exception as e:  # noqa: BLE001
++            return str(e)
++
++    async def import_rig_state(self, state, chains_dir):
+         try:
+-            async with sse_client(LOOPER_SSE_URL) as (r, w):
+-                async with ClientSession(r, w) as session:
+-                    await session.initialize()
+-                    await session.call_tool("save_session", {"path": looper_path})
+-            looper_session = looper_path
+-            messages.append(f"Looper session saved to {looper_path}")
+-        except Exception as e:
+-            messages.append(f"Failed to save looper session: {e}")
+-
+-    # Capture live external pw-link routing (looper <-> Carla) so non-standard
+-    # wiring survives a save/load round-trip. Without this, only the static
+-    # 2-channel monitor wiring is restored on load.
+-    routing = []
+-    try:
+-        routing = JackRouter().list_connections(filter_prefixes=["loopers:", "Carla:"])
+-        messages.append(f"Captured {len(routing)} external routing connection(s)")
+-    except Exception as e:
+-        messages.append(f"Failed to capture routing: {e}")
+-
+-    # Save rig manifest
+-    manifest = _build_rig_manifest(
+-        carla_running=_is_carla_reachable(),
+-        looper_running=_is_looper_reachable(),
+-        carla_session=carla_session,
+-        looper_session=looper_session,
+-        routing=routing,
+-    )
+-    manifest_path = session_dir / "rig_manifest.json"
+-    manifest_path.write_text(json.dumps(manifest, indent=2))
+-    messages.append(f"Rig manifest saved to {manifest_path}")
++            result = await _carla_call(
++                "import_rig_state", {"state": state, "chains_dir": chains_dir}
++            )
++            return result if isinstance(result, dict) else {"messages": []}
++        except Exception as e:  # noqa: BLE001
++            return {"messages": [f"import_rig_state failed: {e}"]}
+ 
+-    return "\n".join(messages)
++    async def export_rig_state(self, chains_dir):
++        if not _is_carla_reachable():
++            return None
++        try:
++            result = await _carla_call("export_rig_state", {"chains_dir": chains_dir})
++            return result if isinstance(result, dict) else None
++        except Exception:  # noqa: BLE001
++            return None
++
++    # ----- looper payload -------------------------------------------------
++
++    async def _looper_command(self, command) -> str | None:
++        try:
++            response = await self._looper.send_command(command)
++        except ConnectionError as e:
++            return str(e)
++        if isinstance(response, dict) and "error" in response:
++            return str(response["error"])
++        return None
++
++    async def load_looper_session(self, project_path):
++        return await self._looper_command({"LoadSession": project_path})
++
++    async def looper_save_session_at(self, dir_path):
++        return await self._looper_command({"SaveSessionAt": dir_path})
++
++    async def looper_get_state(self):
++        try:
++            return _unwrap_looper_state(await self._looper.get_state())
++        except ConnectionError:
++            return None
++
++    async def set_looper_mutes(self, main_muted, all_muted):
++        err = await self._looper_command({"SetMainOutputMute": main_muted})
++        if err:
++            return err
++        return await self._looper_command({"SetAllOutputsMute": all_muted})
+ 
+ 
+ @bridge.tool()
+-async def load_rig_session(name: str) -> str:
+-    """Load a saved rig session (starts backends if needed, restores state)."""
++async def save_rig_session(name: str) -> str:
++    """Save the live rig as a v3 rig_session.json (self-verifying).
++
++    Report opens with OK / DEGRADED: <n> issues / FAILED: <reason>.
++    """
++    global _current_graph
+     session_dir = RIG_SESSION_DIR / name
+-    manifest_path = session_dir / "rig_manifest.json"
++    report = await do_save(name, session_dir, BridgeOps())
++    try:
++        _current_graph = read_session(session_dir).graph
++    except SessionError:
++        pass  # report already carries the FAILED verdict
++    return report
+ 
+-    if not manifest_path.exists():
+-        return f"No rig session found at {session_dir}"
+ 
+-    manifest = json.loads(manifest_path.read_text())
+-    messages = []
++@bridge.tool()
++async def load_rig_session(name: str) -> str:
++    """Load a rig session: read/migrate -> clean slate -> converge -> verify.
+ 
+-    carla_cfg = manifest.get("backends", {}).get("carla", {})
+-    if carla_cfg.get("session"):
+-        if not _is_carla_reachable():
+-            messages.append(await _start_carla())
++    Report opens with OK / DEGRADED: <n> issues / FAILED: <reason>.
++    """
++    global _current_graph
++    session_dir = RIG_SESSION_DIR / name
++    report = await do_load(name, session_dir, BridgeOps())
++    if not report.startswith("FAILED"):
+         try:
+-            async with sse_client(CARLA_SSE_URL) as (r, w):
+-                async with ClientSession(r, w) as session:
+-                    await session.initialize()
+-                    await session.call_tool(
+-                        "load_project", {"filename": carla_cfg["session"]}
+-                    )
+-            messages.append("Carla session loaded.")
+-        except Exception as e:
+-            messages.append(f"Failed to load Carla session: {e}")
+-
+-        # Rebuild the process-per-track rig graph: respawn each child
+-        # instance and restore its chain. Must run after the main project
+-        # loads (which only restores the main instance's own plugins).
+-        rig_state_path = session_dir / "rig_state.json"
+-        if rig_state_path.exists():
+-            try:
+-                rig_state = json.loads(rig_state_path.read_text())
+-                chains_dir = str(session_dir / "chains")
+-                async with sse_client(CARLA_SSE_URL) as (r, w):
+-                    async with ClientSession(r, w) as session:
+-                        await session.initialize()
+-                        result = await session.call_tool(
+-                            "import_rig_state",
+-                            {"state": rig_state, "chains_dir": chains_dir},
+-                        )
+-                summary = _tool_result_json(result) or {}
+-                tracks = summary.get("tracks", [])
+-                messages.append(f"Rig graph restored ({len(tracks)} track/bus chains).")
+-                for note in summary.get("messages", []):
+-                    messages.append(f"  ⚠ {note}")
+-            except Exception as e:
+-                messages.append(f"Failed to restore rig graph: {e}")
+-
+-    looper_cfg = manifest.get("backends", {}).get("looper", {})
+-    if looper_cfg.get("session"):
+-        if not _is_looper_reachable():
+-            messages.append(await _start_looper())
++            _current_graph = read_session(session_dir).graph
++        except SessionError:
++            pass
++    return report
++
++
++@bridge.tool()
++async def verify_rig(name: str = "") -> str:
++    """Read-only: is the live rig still what the session says it should be?
++
++    Verifies against the named session, or the last loaded/saved session
++    when *name* is empty. Uses the exact same diff the load path uses.
++    """
++    if name:
+         try:
+-            async with sse_client(LOOPER_SSE_URL) as (r, w):
+-                async with ClientSession(r, w) as session:
+-                    await session.initialize()
+-                    await session.call_tool(
+-                        "load_session", {"path": looper_cfg["session"]}
+-                    )
+-            messages.append("Looper session loaded.")
+-        except Exception as e:
+-            messages.append(f"Failed to load looper session: {e}")
+-
+-    # Restore external Carla wiring (loopers handles its own JACK connections)
+-    from carla_mcp.utils.pw_link import (
+-        ensure_carla_to_monitors, find_capture_input_ports, pw_link_connect,
+-    )
++            graph = read_session(RIG_SESSION_DIR / name).graph
++        except SessionError as e:
++            return f"FAILED: {e}"
++    elif _current_graph is not None:
++        graph = _current_graph
++    else:
++        return "FAILED: no rig session loaded this run; pass a session name"
++    return await do_verify(graph, BridgeOps())
+ 
+-    monitors_result = ensure_carla_to_monitors()
+-    captures = find_capture_input_ports()
+-    capture_connected = 0
+-    for i, cap in enumerate(captures[:2]):
+-        r = pw_link_connect(cap, f"Carla:audio-in{i + 1}")
+-        if r.success:
+-            capture_connected += 1
+ 
+-    mon_total = monitors_result["connected"] + monitors_result["already_connected"]
+-    messages.append(
+-        f"[Routing] Monitors: {mon_total}/2, Captures: {capture_connected}/{len(captures[:2])}"
+-    )
++@bridge.tool()
++async def rig_routing_reset() -> str:
++    """Clean slate: disconnect every pw link touching rig port space
++    (loopers:*, Carla*, and MIDI into the looper). Manual escape hatch
++    for stale PipeWire link tangles."""
++    return await do_routing_reset(BridgeOps())
+ 
+-    # Replay saved external pw-link routing (v2+ manifests). The static wiring
+-    # above remains the fallback for legacy v1 manifests that have no "routing"
+-    # key. Each entry is a [source, dest] pair captured at save time.
+-    saved_routing = manifest.get("routing") or []
+-    if saved_routing:
+-        routing_connected = 0
+-        for entry in saved_routing:
+-            try:
+-                src, dst = entry
+-            except (ValueError, TypeError):
+-                continue
+-            r = pw_link_connect(src, dst)
+-            if r.success:
+-                routing_connected += 1
+-        messages.append(
+-            f"[Routing] Saved connections: {routing_connected}/{len(saved_routing)}"
+-        )
+ 
+-    return "\n".join(messages) if messages else "Nothing to load."
++@bridge.tool()
++async def stop_rig(save_as: str = "") -> str:
++    """Tear the rig down (children -> main Carla -> looper MCP -> looper
++    engine -> a2j), verified dead. Optionally save first with *save_as*."""
++    global _current_graph
++    parts = []
++    ops = BridgeOps()
++    if save_as:
++        parts.append(await do_save(save_as, RIG_SESSION_DIR / save_as, ops))
++    parts.append(await do_stop(_current_graph, ops))
++    _current_graph = None
++    return "\n\n".join(parts)
+ 
+ 
+ @bridge.tool()
+ async def list_rig_sessions() -> str:
+     """List all saved rig sessions."""
+     if not RIG_SESSION_DIR.exists():
+         return "No rig sessions saved yet."
+     sessions = sorted(d.name for d in RIG_SESSION_DIR.iterdir() if d.is_dir())
+     if not sessions:
+         return "No rig sessions saved yet."
+@@ -741,20 +871,33 @@ def _atexit_cleanup():
+         try:
+             _looper_engine_process.wait(timeout=5)
+         except subprocess.TimeoutExpired:
+             _looper_engine_process.kill()
+             _looper_engine_process.wait()
+         _looper_engine_process = None
+     if _looper_engine_log_file is not None:
+         _looper_engine_log_file.close()
+         _looper_engine_log_file = None
+ 
++    global _a2j_process, _a2j_log_file
++    if _a2j_process is not None and _a2j_process.poll() is None:
++        _a2j_process.terminate()
++        try:
++            _a2j_process.wait(timeout=5)
++        except subprocess.TimeoutExpired:
++            _a2j_process.kill()
++            _a2j_process.wait()
++        _a2j_process = None
++    if _a2j_log_file is not None:
++        _a2j_log_file.close()
++        _a2j_log_file = None
++
+ 
+ atexit.register(_atexit_cleanup)
+ 
+ 
+ def main():
+     bridge.run(transport="stdio")
+ 
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py b/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py
+new file mode 100644
+index 000000000..7d27a188d
+--- /dev/null
++++ b/source/frontend/carla_mcp/tests/test_bridge_rig_tools.py
+@@ -0,0 +1,145 @@
++"""Tests for the bridge's thin rig tools and managed-mode process handling."""
++
++import asyncio
++from pathlib import Path
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import carla_mcp.mcp_stdio_bridge as bridge_mod
++
++
++class TestManagedLooperLaunch:
++    @patch("carla_mcp.mcp_stdio_bridge.subprocess.Popen")
++    @patch("carla_mcp.mcp_stdio_bridge._is_looper_reachable", return_value=False)
++    def test_engine_launched_with_managed_flag(self, _reach, mock_popen):
++        proc = MagicMock()
++        proc.poll.return_value = None
++        proc.pid = 1234
++        mock_popen.return_value = proc
++        with patch("carla_mcp.mcp_stdio_bridge.subprocess.run") as mock_run:
++            mock_run.return_value = MagicMock(stdout="loopers:loop0_out_l", returncode=0)
++            with patch("carla_mcp.mcp_stdio_bridge._is_looper_running", return_value=False):
++                # stop before MCP phase by making reachability stay false and
++                # patching discover to no-op; we only care about the engine argv
++                asyncio.run(bridge_mod._start_looper())
++        argv = mock_popen.call_args_list[0].args[0]
++        assert argv[0] == "pw-jack"
++        assert argv[-1] == "--managed"
++
++
++class TestThinTools:
++    def test_load_delegates_to_do_load(self, tmp_path):
++        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
++            with patch("carla_mcp.mcp_stdio_bridge.do_load",
++                       new=AsyncMock(return_value="OK")) as mock_load:
++                result = asyncio.run(bridge_mod.load_rig_session.fn("mysession"))
++        assert result == "OK"
++        name, session_dir = mock_load.await_args.args[0], mock_load.await_args.args[1]
++        assert name == "mysession"
++        assert session_dir == tmp_path / "mysession"
++
++    def test_save_delegates_to_do_save(self, tmp_path):
++        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
++            with patch("carla_mcp.mcp_stdio_bridge.do_save",
++                       new=AsyncMock(return_value="OK")) as mock_save:
++                result = asyncio.run(bridge_mod.save_rig_session.fn("mysession"))
++        assert result == "OK"
++        assert mock_save.await_args.args[0] == "mysession"
++
++    def test_verify_without_session_is_failed(self):
++        bridge_mod._current_graph = None
++        result = asyncio.run(bridge_mod.verify_rig.fn(""))
++        assert result.startswith("FAILED:")
++
++    def test_verify_with_named_session_reads_it(self, tmp_path):
++        import json
++        sdir = tmp_path / "named"
++        sdir.mkdir()
++        (sdir / "rig_session.json").write_text(json.dumps(
++            {"version": 3, "name": "named", "nodes": [], "edges": [],
++             "runtime_units": []}))
++        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
++            with patch("carla_mcp.mcp_stdio_bridge.do_verify",
++                       new=AsyncMock(return_value="OK")) as mock_verify:
++                result = asyncio.run(bridge_mod.verify_rig.fn("named"))
++        assert result == "OK"
++        mock_verify.assert_awaited_once()
++
++    def test_routing_reset_delegates(self):
++        with patch("carla_mcp.mcp_stdio_bridge.do_routing_reset",
++                   new=AsyncMock(return_value="OK")) as mock_reset:
++            result = asyncio.run(bridge_mod.rig_routing_reset.fn())
++        assert result == "OK"
++        mock_reset.assert_awaited_once()
++
++    def test_stop_rig_saves_first_when_asked(self, tmp_path):
++        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
++            with patch("carla_mcp.mcp_stdio_bridge.do_save",
++                       new=AsyncMock(return_value="OK")) as mock_save:
++                with patch("carla_mcp.mcp_stdio_bridge.do_stop",
++                           new=AsyncMock(return_value="OK")) as mock_stop:
++                    result = asyncio.run(bridge_mod.stop_rig.fn("keepsake"))
++        mock_save.assert_awaited_once()
++        mock_stop.assert_awaited_once()
++        assert result.count("OK") >= 1
++
++    def test_stop_rig_without_save(self):
++        with patch("carla_mcp.mcp_stdio_bridge.do_stop",
++                   new=AsyncMock(return_value="OK")) as mock_stop:
++            result = asyncio.run(bridge_mod.stop_rig.fn(""))
++        mock_stop.assert_awaited_once()
++        assert result == "OK"
++
++    def test_legacy_manifest_builder_is_gone(self):
++        assert not hasattr(bridge_mod, "_build_rig_manifest")
++
++
++class TestBridgeOpsPrimitives:
++    def test_connect_returns_none_on_success(self):
++        from carla_mcp.utils.pw_link import PwLinkResult
++        ops = bridge_mod.BridgeOps()
++        with patch("carla_mcp.mcp_stdio_bridge.pw_link_connect",
++                   return_value=PwLinkResult(success=True)):
++            assert ops.connect("a:1", "b:1") is None
++
++    def test_connect_returns_message_on_failure(self):
++        from carla_mcp.utils.pw_link import PwLinkResult
++        ops = bridge_mod.BridgeOps()
++        with patch("carla_mcp.mcp_stdio_bridge.pw_link_connect",
++                   return_value=PwLinkResult(success=False, message="nope")):
++            assert ops.connect("a:1", "b:1") == "nope"
++
++    def test_wait_ports_returns_missing_after_timeout(self):
++        ops = bridge_mod.BridgeOps()
++        with patch("carla_mcp.mcp_stdio_bridge.pw_link_list_outputs",
++                   return_value=["have:1"]):
++            with patch("carla_mcp.mcp_stdio_bridge.pw_link_list_inputs",
++                       return_value=[]):
++                missing = ops.wait_ports(["have:1", "want:1"], timeout_s=0.1)
++        assert missing == ["want:1"]
++
++
++class TestLooperStateUnwrap:
++    """The Rust remote nests state under a "state" key; do_save/observe read
++    main_muted/loopers at the TOP level of what looper_get_state() returns, so
++    BridgeOps must unwrap the envelope."""
++
++    def test_looper_get_state_unwraps_envelope(self):
++        ops = bridge_mod.BridgeOps()
++        envelope = {"state": {"main_muted": True,
++                              "loopers": [{"id": 1, "port_index": 0}]}}
++        ops._looper.get_state = AsyncMock(return_value=envelope)
++        state = asyncio.run(ops.looper_get_state())
++        assert state == {"main_muted": True,
++                         "loopers": [{"id": 1, "port_index": 0}]}
++
++    def test_looper_get_state_passthrough_when_no_envelope(self):
++        ops = bridge_mod.BridgeOps()
++        raw = {"main_muted": False, "loopers": []}
++        ops._looper.get_state = AsyncMock(return_value=raw)
++        state = asyncio.run(ops.looper_get_state())
++        assert state == raw
++
++    def test_looper_get_state_none_on_connection_error(self):
++        ops = bridge_mod.BridgeOps()
++        ops._looper.get_state = AsyncMock(side_effect=ConnectionError("down"))
++        assert asyncio.run(ops.looper_get_state()) is None
+diff --git a/source/frontend/carla_mcp/tests/test_load_rig_routing.py b/source/frontend/carla_mcp/tests/test_load_rig_routing.py
+deleted file mode 100644
+index adec76883..000000000
+--- a/source/frontend/carla_mcp/tests/test_load_rig_routing.py
++++ /dev/null
+@@ -1,54 +0,0 @@
+-"""Tests for load_rig_session external Carla wiring."""
+-
+-import asyncio
+-import json
+-from unittest.mock import AsyncMock, patch, MagicMock
+-
+-from carla_mcp.utils.pw_link import PwLinkResult
+-
+-
+-@patch(
+-    "carla_mcp.utils.pw_link.find_capture_input_ports",
+-    return_value=["alsa_input.test:capture_AUX0", "alsa_input.test:capture_AUX1"],
+-)
+-@patch(
+-    "carla_mcp.utils.pw_link.ensure_carla_to_monitors",
+-    return_value={"connected": 1, "already_connected": 1, "failed": 0, "monitor_ports": ["m:0", "m:1"]},
+-)
+-@patch("carla_mcp.utils.pw_link.pw_link_connect", return_value=PwLinkResult(success=True))
+-@patch("carla_mcp.mcp_stdio_bridge._is_looper_reachable", return_value=True)
+-@patch("carla_mcp.mcp_stdio_bridge._is_carla_reachable", return_value=True)
+-@patch("carla_mcp.mcp_stdio_bridge.sse_client")
+-def test_load_rig_session_wires_carla_externally(
+-    mock_sse, mock_carla_reach, mock_looper_reach,
+-    mock_connect, mock_ensure, mock_captures, tmp_path
+-):
+-    """load_rig_session should wire Carla to monitors and captures."""
+-    mock_session = AsyncMock()
+-    mock_session.initialize = AsyncMock()
+-    mock_session.call_tool = AsyncMock()
+-    mock_sse.return_value.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+-
+-    with patch("carla_mcp.mcp_stdio_bridge.ClientSession") as mock_cs:
+-        mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+-        mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+-
+-        session_dir = tmp_path / "test-session"
+-        session_dir.mkdir()
+-        manifest = {
+-            "version": 1,
+-            "backends": {
+-                "carla": {"running": True, "session": str(session_dir / "carla.carxp")},
+-                "looper": {"running": True, "session": str(session_dir / "looper.json")},
+-            },
+-        }
+-        (session_dir / "rig_manifest.json").write_text(json.dumps(manifest))
+-
+-        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
+-            from carla_mcp.mcp_stdio_bridge import load_rig_session
+-            result = asyncio.run(load_rig_session.fn("test-session"))
+-
+-        mock_ensure.assert_called_once()
+-        # 2 capture connections (AUX0→in1, AUX1→in2)
+-        assert mock_connect.call_count == 2
+-        assert "Routing" in result
+diff --git a/source/frontend/carla_mcp/tests/test_rig_routing_roundtrip.py b/source/frontend/carla_mcp/tests/test_rig_routing_roundtrip.py
+deleted file mode 100644
+index d010dc4b6..000000000
+--- a/source/frontend/carla_mcp/tests/test_rig_routing_roundtrip.py
++++ /dev/null
+@@ -1,186 +0,0 @@
+-"""FIX 3: rig session must save/restore external JACK (pw-link) routing.
+-
+-A non-standard pw-link routing (e.g. a looper output wired to a Carla input)
+-must survive a save/load round-trip. Backward compatibility: a v1 manifest
+-with no "routing" key must still load via the static fallback wiring.
+-"""
+-
+-import asyncio
+-import json
+-from unittest.mock import AsyncMock, MagicMock, patch
+-
+-from carla_mcp.mcp_stdio_bridge import _build_rig_manifest
+-from carla_mcp.utils.pw_link import PwLinkResult
+-
+-
+-# ---------------------------------------------------------------------------
+-# Manifest shape (version bump + routing key)
+-# ---------------------------------------------------------------------------
+-
+-def test_manifest_version_bumped_to_2():
+-    """Manifest must be version 2 once routing is captured."""
+-    manifest = _build_rig_manifest(
+-        carla_running=True,
+-        looper_running=True,
+-        carla_session="c.carxp",
+-        looper_session="l.json",
+-    )
+-    assert manifest["version"] == 2
+-
+-
+-def test_manifest_stores_routing():
+-    """A routing list passed in must be stored under the 'routing' key."""
+-    routing = [["loopers:out_1", "Carla:audio-in1"], ["loopers:out_2", "Carla:audio-in2"]]
+-    manifest = _build_rig_manifest(
+-        carla_running=True,
+-        looper_running=True,
+-        routing=routing,
+-    )
+-    assert manifest["routing"] == routing
+-
+-
+-def test_manifest_routing_defaults_empty():
+-    """Without routing the key must still exist (empty list)."""
+-    manifest = _build_rig_manifest(carla_running=False, looper_running=False)
+-    assert manifest.get("routing") == []
+-
+-
+-# ---------------------------------------------------------------------------
+-# save_rig_session captures live pw-link connections
+-# ---------------------------------------------------------------------------
+-
+-@patch("carla_mcp.mcp_stdio_bridge._is_looper_reachable", return_value=False)
+-@patch("carla_mcp.mcp_stdio_bridge._is_carla_reachable", return_value=False)
+-def test_save_captures_live_routing(mock_carla, mock_looper, tmp_path):
+-    """save_rig_session must capture live connections via JackRouter and write
+-    them into the manifest under 'routing'."""
+-    live = [("loopers:out_1", "Carla:audio-in1"), ("loopers:out_2", "Carla:audio-in2")]
+-
+-    mock_router = MagicMock()
+-    mock_router.list_connections = MagicMock(return_value=live)
+-
+-    with patch("carla_mcp.mcp_stdio_bridge.JackRouter", return_value=mock_router):
+-        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
+-            from carla_mcp.mcp_stdio_bridge import save_rig_session
+-            asyncio.run(save_rig_session.fn("test-session"))
+-
+-    # list_connections should have been called filtering loopers/Carla prefixes
+-    mock_router.list_connections.assert_called_once()
+-    _, kwargs = mock_router.list_connections.call_args
+-    prefixes = kwargs.get("filter_prefixes") or (
+-        mock_router.list_connections.call_args.args[0]
+-        if mock_router.list_connections.call_args.args else None
+-    )
+-    assert prefixes is not None
+-    assert "loopers:" in prefixes and "Carla:" in prefixes
+-
+-    manifest = json.loads((tmp_path / "test-session" / "rig_manifest.json").read_text())
+-    assert manifest["version"] == 2
+-    # Routing entries are stored (as lists after JSON round-trip).
+-    assert [list(c) for c in live] == [list(c) for c in manifest["routing"]]
+-
+-
+-# ---------------------------------------------------------------------------
+-# load_rig_session replays saved routing
+-# ---------------------------------------------------------------------------
+-
+-@patch(
+-    "carla_mcp.utils.pw_link.find_capture_input_ports",
+-    return_value=[],
+-)
+-@patch(
+-    "carla_mcp.utils.pw_link.ensure_carla_to_monitors",
+-    return_value={"connected": 0, "already_connected": 0, "failed": 0, "monitor_ports": []},
+-)
+-@patch("carla_mcp.utils.pw_link.pw_link_connect", return_value=PwLinkResult(success=True))
+-@patch("carla_mcp.mcp_stdio_bridge._is_looper_reachable", return_value=True)
+-@patch("carla_mcp.mcp_stdio_bridge._is_carla_reachable", return_value=True)
+-@patch("carla_mcp.mcp_stdio_bridge.sse_client")
+-def test_load_replays_saved_routing(
+-    mock_sse, mock_carla, mock_looper, mock_connect, mock_ensure, mock_caps, tmp_path
+-):
+-    """A v2 manifest with routing entries must replay each saved connection."""
+-    mock_session = AsyncMock()
+-    mock_session.initialize = AsyncMock()
+-    mock_session.call_tool = AsyncMock()
+-    mock_sse.return_value.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+-
+-    routing = [["loopers:out_1", "Carla:audio-in1"], ["loopers:out_2", "Carla:audio-in2"]]
+-
+-    with patch("carla_mcp.mcp_stdio_bridge.ClientSession") as mock_cs:
+-        mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+-        mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+-
+-        session_dir = tmp_path / "rt-session"
+-        session_dir.mkdir()
+-        manifest = {
+-            "version": 2,
+-            "backends": {
+-                "carla": {"running": True, "session": str(session_dir / "carla.carxp")},
+-                "looper": {"running": True, "session": str(session_dir / "looper.json")},
+-            },
+-            "routing": routing,
+-        }
+-        (session_dir / "rig_manifest.json").write_text(json.dumps(manifest))
+-
+-        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
+-            from carla_mcp.mcp_stdio_bridge import load_rig_session
+-            result = asyncio.run(load_rig_session.fn("rt-session"))
+-
+-    # Each saved routing connection should be replayed.
+-    replayed = {
+-        (c.args[0], c.args[1]) for c in mock_connect.call_args_list
+-    }
+-    for src, dst in routing:
+-        assert (src, dst) in replayed, f"missing replay of {src} -> {dst}"
+-    assert isinstance(result, str)
+-
+-
+-# ---------------------------------------------------------------------------
+-# Backward compat: v1 manifest with no routing key still loads
+-# ---------------------------------------------------------------------------
+-
+-@patch(
+-    "carla_mcp.utils.pw_link.find_capture_input_ports",
+-    return_value=["alsa_input.test:capture_AUX0", "alsa_input.test:capture_AUX1"],
+-)
+-@patch(
+-    "carla_mcp.utils.pw_link.ensure_carla_to_monitors",
+-    return_value={"connected": 1, "already_connected": 1, "failed": 0, "monitor_ports": ["m:0", "m:1"]},
+-)
+-@patch("carla_mcp.utils.pw_link.pw_link_connect", return_value=PwLinkResult(success=True))
+-@patch("carla_mcp.mcp_stdio_bridge._is_looper_reachable", return_value=True)
+-@patch("carla_mcp.mcp_stdio_bridge._is_carla_reachable", return_value=True)
+-@patch("carla_mcp.mcp_stdio_bridge.sse_client")
+-def test_load_v1_manifest_no_routing_still_loads(
+-    mock_sse, mock_carla, mock_looper, mock_connect, mock_ensure, mock_caps, tmp_path
+-):
+-    """A legacy v1 manifest (no 'routing' key) must load without error and fall
+-    back to the static wiring (ensure_carla_to_monitors + capture wiring)."""
+-    mock_session = AsyncMock()
+-    mock_session.initialize = AsyncMock()
+-    mock_session.call_tool = AsyncMock()
+-    mock_sse.return_value.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+-
+-    with patch("carla_mcp.mcp_stdio_bridge.ClientSession") as mock_cs:
+-        mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+-        mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+-
+-        session_dir = tmp_path / "v1-session"
+-        session_dir.mkdir()
+-        manifest = {
+-            "version": 1,
+-            "backends": {
+-                "carla": {"running": True, "session": str(session_dir / "carla.carxp")},
+-                "looper": {"running": True, "session": str(session_dir / "looper.json")},
+-            },
+-        }
+-        (session_dir / "rig_manifest.json").write_text(json.dumps(manifest))
+-
+-        with patch("carla_mcp.mcp_stdio_bridge.RIG_SESSION_DIR", tmp_path):
+-            from carla_mcp.mcp_stdio_bridge import load_rig_session
+-            result = asyncio.run(load_rig_session.fn("v1-session"))
+-
+-    # Static fallback wiring still runs.
+-    mock_ensure.assert_called_once()
+-    assert "Routing" in result
+diff --git a/source/frontend/carla_mcp/tests/test_rig_session.py b/source/frontend/carla_mcp/tests/test_rig_session.py
+deleted file mode 100644
+index 95bf71378..000000000
+--- a/source/frontend/carla_mcp/tests/test_rig_session.py
++++ /dev/null
+@@ -1,27 +0,0 @@
+-import json
+-import pytest
+-from carla_mcp.mcp_stdio_bridge import _build_rig_manifest
+-
+-
+-def test_rig_manifest_structure():
+-    manifest = _build_rig_manifest(
+-        carla_running=True,
+-        looper_running=True,
+-        carla_session="my_carla_project.carxp",
+-        looper_session="my_looper_session.json",
+-    )
+-    assert manifest["version"] == 2
+-    assert manifest["backends"]["carla"]["running"] is True
+-    assert manifest["backends"]["looper"]["running"] is True
+-    assert manifest["backends"]["carla"]["session"] == "my_carla_project.carxp"
+-    assert manifest["backends"]["looper"]["session"] == "my_looper_session.json"
+-
+-
+-def test_rig_manifest_defaults():
+-    manifest = _build_rig_manifest(
+-        carla_running=False,
+-        looper_running=False,
+-    )
+-    assert manifest["version"] == 2
+-    assert manifest["backends"]["carla"]["running"] is False
+-    assert manifest["backends"]["carla"]["session"] == ""

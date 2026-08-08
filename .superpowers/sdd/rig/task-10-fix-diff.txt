@@ -1,0 +1,77 @@
+diff --git a/source/frontend/carla_mcp/rig/converge.py b/source/frontend/carla_mcp/rig/converge.py
+index 5879da1b6..7c936a0aa 100644
+--- a/source/frontend/carla_mcp/rig/converge.py
++++ b/source/frontend/carla_mcp/rig/converge.py
+@@ -320,21 +320,30 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
+         if err is None:
+             carla_project = "carla_project.carxp"
+         else:
+             notes.append(f"carla project save: {err}")
+         graph.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
+     else:
+         notes.append("carla not reachable; no Carla state saved")
+ 
+     state = await ops.looper_get_state()
+     if state is not None:
+-        for loop_node in loop_nodes_from_looper_state(state):
++        raw_loopers = (state or {}).get("loopers", []) or []
++        loop_nodes = loop_nodes_from_looper_state(state)
++        if len(loop_nodes) < len(raw_loopers):
++            for entry in raw_loopers:
++                if entry.get("port_index") is None:
++                    notes.append(
++                        f"looper id={entry.get('id')} has no port_index "
++                        "(pre-contract engine?); dropped from saved session"
++                    )
++        for loop_node in loop_nodes:
+             if graph.has_node(loop_node.name):
+                 existing = graph.nodes[loop_node.name]
+                 existing.looper_id = loop_node.looper_id
+                 existing.port_index = loop_node.port_index
+             else:
+                 graph.add_node(loop_node)
+         if not graph.has_node("app:looper"):
+             graph.add_node(Node(name="app:looper", kind="app"))
+         app = graph.nodes["app:looper"]
+         app.main_muted = bool(state.get("main_muted", False))
+diff --git a/source/frontend/carla_mcp/tests/test_rig_converge_save.py b/source/frontend/carla_mcp/tests/test_rig_converge_save.py
+index 11e3d7153..b54a0d76b 100644
+--- a/source/frontend/carla_mcp/tests/test_rig_converge_save.py
++++ b/source/frontend/carla_mcp/tests/test_rig_converge_save.py
+@@ -111,20 +111,36 @@ class TestDoSave:
+         class DeadOps(SaveFakeOps):
+             async def export_rig_state(self, chains_dir):
+                 return None
+             async def looper_get_state(self):
+                 return None
+             async def observe(self, graph):
+                 return ObservedState()
+         report = asyncio.run(do_save("s", tmp_path / "s", DeadOps()))
+         assert report.startswith("FAILED:")
+ 
++    def test_looper_without_port_index_is_named_not_silently_dropped(self, tmp_path):
++        class DegradedLooperOps(SaveFakeOps):
++            async def looper_get_state(self):
++                state = await super().looper_get_state()
++                state["loopers"].append(
++                    {"id": 99, "port_index": None, "mode": "Playing",
++                     "level_db": 0.0, "pan": 0.0, "input_source": None}
++                )
++                return state
++        sdir = tmp_path / "s"
++        report = asyncio.run(do_save("s", sdir, DegradedLooperOps()))
++        assert report.splitlines()[0].startswith("DEGRADED:"), report
++        assert "id=99" in report
++        sess = read_session(sdir)
++        assert sess.graph.get_node("loop:0").looper_id == 7
++
+     def test_missing_referenced_file_degrades(self, tmp_path):
+         class NoChainOps(SaveFakeOps):
+             async def export_rig_state(self, chains_dir):
+                 export = await super().export_rig_state(chains_dir)
+                 # simulate a child whose save failed: file never written
+                 Path(export["nodes"][1]["chain_file"]).unlink()
+                 return export
+         report = asyncio.run(do_save("s", tmp_path / "s", NoChainOps()))
+         assert report.startswith("DEGRADED:")
+         assert "chains/strat.carxp" in report

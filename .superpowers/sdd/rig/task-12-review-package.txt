@@ -1,0 +1,377 @@
+=== COMMITS 5617aaea7..191696afd ===
+191696afd feat(rig): observe() I/O assembler and rig_handles observation tool
+
+=== DIFFSTAT ===
+ source/frontend/carla_mcp/rig/controller.py        | 21 ++++++
+ source/frontend/carla_mcp/rig/observe.py           | 56 ++++++++++++++-
+ source/frontend/carla_mcp/rig/register.py          | 10 +++
+ .../carla_mcp/tests/test_rig_observe_io.py         | 79 ++++++++++++++++++++++
+ .../frontend/carla_mcp/tests/test_rig_register.py  | 16 +++--
+ 5 files changed, 173 insertions(+), 9 deletions(-)
+
+=== FULL DIFF (U10) ===
+diff --git a/source/frontend/carla_mcp/rig/controller.py b/source/frontend/carla_mcp/rig/controller.py
+index f89bdece2..2f608c789 100644
+--- a/source/frontend/carla_mcp/rig/controller.py
++++ b/source/frontend/carla_mcp/rig/controller.py
+@@ -1232,10 +1232,31 @@ class RigController:
+         # 3. Re-apply routing edges not already wired by create_track.
+         for e in state.get("edges", []):
+             src, dst = e["src"], e["dst"]
+             if any(x.src == src and x.dst == dst for x in self._graph.edges):
+                 continue
+             res = self.route(src, dst)
+             if not res.get("success"):
+                 messages.append(f"route {src} -> {dst} failed: {res.get('message')}")
+ 
+         return {"success": True, "tracks": restored, "messages": messages}
++
++    async def snapshot_handles(self) -> dict:
++        """Re-resolve every track/bus child's live plugin handles.
++
++        Read-only observation surface for the reconciler: one list_handles
++        round-trip per child.  Failures are reported per node, never raised.
++
++        Returns:
++            ``{"nodes": {node_name: {plugin_id_str: handle}}, "errors": [...]}``.
++        """
++        nodes: dict = {}
++        errors: list[str] = []
++        for node in list(self._graph.nodes.values()):
++            if node.kind not in ("track", "bus"):
++                continue
++            try:
++                handles = await self._remote(node).list_handles()
++                nodes[node.name] = {str(pid): h for pid, h in handles.items()}
++            except Exception as exc:  # noqa: BLE001 — report, don't abort
++                errors.append(f"{node.name}: {exc}")
++        return {"nodes": nodes, "errors": errors}
+diff --git a/source/frontend/carla_mcp/rig/observe.py b/source/frontend/carla_mcp/rig/observe.py
+index b484baf46..8450235b0 100644
+--- a/source/frontend/carla_mcp/rig/observe.py
++++ b/source/frontend/carla_mcp/rig/observe.py
+@@ -4,23 +4,23 @@ and in each managed process.
+ 
+ This module's data types are pure; `observe()` (added separately) gathers a
+ snapshot through injected callables so the bridge supplies real I/O and tests
+ supply fabricated state.  stdlib-only: this package is imported by the main
+ Carla process running system Python.
+ """
+ 
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass, field
+-from typing import Dict, List, Optional
++from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+ 
+-from carla_mcp.rig.graph import Node
++from carla_mcp.rig.graph import Node, RuntimeUnit
+ 
+ 
+ @dataclass(frozen=True)
+ class Link:
+     """One live pw-link connection (source port -> destination port)."""
+ 
+     src: str
+     dst: str
+ 
+ 
+@@ -62,10 +62,62 @@ def loop_nodes_from_looper_state(state: Optional[dict]) -> List[Node]:
+     for entry in (state or {}).get("loopers", []) or []:
+         idx = entry.get("port_index")
+         if idx is None:
+             continue
+         nodes.append(
+             Node(name=f"loop:{idx}", kind="loop",
+                  looper_id=entry.get("id"), port_index=idx)
+         )
+     nodes.sort(key=lambda n: n.port_index)
+     return nodes
++
++
++async def observe(
++    units: List["RuntimeUnit"],
++    *,
++    list_links: Callable[[], List[Tuple[str, str]]],
++    list_outputs: Callable[[], List[str]],
++    list_inputs: Callable[[], List[str]],
++    unit_probe: Callable[["RuntimeUnit"], bool],
++    looper_get_state: Optional[Callable[[], "Awaitable[Optional[dict]]"]] = None,
++    carla_handles: Optional[Callable[[], "Awaitable[Dict[str, Dict[str, str]]]"]] = None,
++) -> ObservedState:
++    """Gather a full ObservedState through injected collaborators.
++
++    Every probe is individually shielded: a failing collaborator yields an
++    empty/False observation (which the diff then reports), never an exception.
++    """
++    def _safe_list(fn: Callable[[], list]) -> list:
++        try:
++            return list(fn())
++        except Exception:  # noqa: BLE001 — observation must not raise
++            return []
++
++    status: Dict[str, bool] = {}
++    for unit in units:
++        try:
++            status[unit.name] = bool(unit_probe(unit))
++        except Exception:  # noqa: BLE001
++            status[unit.name] = False
++
++    looper_state = None
++    if looper_get_state is not None:
++        try:
++            looper_state = await looper_get_state()
++        except Exception:  # noqa: BLE001
++            looper_state = None
++
++    handles: Dict[str, Dict[str, str]] = {}
++    if carla_handles is not None:
++        try:
++            handles = dict(await carla_handles() or {})
++        except Exception:  # noqa: BLE001
++            handles = {}
++
++    return ObservedState(
++        links=[Link(s, d) for s, d in _safe_list(list_links)],
++        output_ports=_safe_list(list_outputs),
++        input_ports=_safe_list(list_inputs),
++        unit_status=status,
++        looper_state=looper_state,
++        instance_handles=handles,
++    )
+diff --git a/source/frontend/carla_mcp/rig/register.py b/source/frontend/carla_mcp/rig/register.py
+index 5fdcf5249..4dc3b2905 100644
+--- a/source/frontend/carla_mcp/rig/register.py
++++ b/source/frontend/carla_mcp/rig/register.py
+@@ -294,20 +294,30 @@ def register_rig_tools(
+ 
+         Parameters
+         ----------
+         state:
+             The dict previously returned by :func:`export_rig_state`.
+         chains_dir:
+             Directory holding the per-node ``<node>.carxp`` files.
+         """
+         return await controller.import_rig_state(state, chains_dir)
+ 
++    @mcp.tool()
++    async def rig_handles() -> dict:
++        """Re-resolve live plugin handles on every track/bus child instance.
++
++        Read-only. Returns ``{"nodes": {node: {plugin_id: handle}},
++        "errors": [...]}``; used by the bridge's rig reconciler to verify
++        that every saved effect still exists after a restore.
++        """
++        return await controller.snapshot_handles()
++
+     # ----- Probe tools (optional) -----------------------------------------
+     if probe is None:
+         return
+ 
+     @mcp.tool()
+     async def play_tone(
+         node: str,
+         hz: float = 440.0,
+         db: float = -12.0,
+         at: str = "input",
+diff --git a/source/frontend/carla_mcp/tests/test_rig_observe_io.py b/source/frontend/carla_mcp/tests/test_rig_observe_io.py
+new file mode 100644
+index 000000000..794ead998
+--- /dev/null
++++ b/source/frontend/carla_mcp/tests/test_rig_observe_io.py
+@@ -0,0 +1,79 @@
++"""Tests for observe() assembly and controller.snapshot_handles."""
++
++import asyncio
++from unittest.mock import AsyncMock, MagicMock
++
++from carla_mcp.rig.controller import RigController
++from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
++from carla_mcp.rig.observe import Link, observe
++
++
++class TestObserve:
++    def test_assembles_snapshot_from_callables(self):
++        units = [RuntimeUnit(name="carla:main", kind="carla-main"),
++                 RuntimeUnit(name="looper:engine", kind="looper-engine")]
++
++        async def get_state():
++            return {"loopers": []}
++
++        async def get_handles():
++            return {"strat": {"0": "strat/eq"}}
++
++        obs = asyncio.run(observe(
++            units,
++            list_links=lambda: [("a:1", "b:1")],
++            list_outputs=lambda: ["a:1"],
++            list_inputs=lambda: ["b:1"],
++            unit_probe=lambda u: u.kind == "carla-main",
++            looper_get_state=get_state,
++            carla_handles=get_handles,
++        ))
++        assert obs.links == [Link("a:1", "b:1")]
++        assert obs.unit_status == {"carla:main": True, "looper:engine": False}
++        assert obs.looper_state == {"loopers": []}
++        assert obs.instance_handles == {"strat": {"0": "strat/eq"}}
++
++    def test_probe_failures_never_raise(self):
++        async def broken():
++            raise ConnectionError("down")
++
++        def broken_sync():
++            raise OSError("pw gone")
++
++        obs = asyncio.run(observe(
++            [RuntimeUnit(name="a2j", kind="a2j")],
++            list_links=broken_sync,
++            list_outputs=broken_sync,
++            list_inputs=broken_sync,
++            unit_probe=lambda u: (_ for _ in ()).throw(OSError("boom")),
++            looper_get_state=broken,
++            carla_handles=broken,
++        ))
++        assert obs.links == [] and obs.output_ports == []
++        assert obs.unit_status == {"a2j": False}
++        assert obs.looper_state is None
++        assert obs.instance_handles == {}
++
++
++class TestSnapshotHandles:
++    def test_collects_per_node_handles_and_errors(self):
++        graph = RigGraph()
++        graph.add_node(Node(name="strat", kind="track", instance="strat"))
++        graph.add_node(Node(name="bass", kind="track", instance="bass"))
++        graph.add_node(Node(name="in:guitar", kind="endpoint"))
++
++        good = MagicMock()
++        good.list_handles = AsyncMock(return_value={0: "strat/eq"})
++        bad = MagicMock()
++        bad.list_handles = AsyncMock(side_effect=RuntimeError("child dead"))
++
++        def factory(node):
++            return good if node.name == "strat" else bad
++
++        controller = RigController(
++            graph, MagicMock(), MagicMock(), MagicMock(),
++            sleep=lambda *_: None, remote_factory=factory,
++        )
++        result = asyncio.run(controller.snapshot_handles())
++        assert result["nodes"] == {"strat": {"0": "strat/eq"}}
++        assert result["errors"] == ["bass: child dead"]
+diff --git a/source/frontend/carla_mcp/tests/test_rig_register.py b/source/frontend/carla_mcp/tests/test_rig_register.py
+index aa7b7d721..d442e062b 100644
+--- a/source/frontend/carla_mcp/tests/test_rig_register.py
++++ b/source/frontend/carla_mcp/tests/test_rig_register.py
+@@ -1,13 +1,13 @@
+ """Tests for rig/register.py — register_rig_tools MCP tool registration.
+ 
+-Verifies all 14 tools are registered and that tool functions forward
++Verifies all 17 tools are registered and that tool functions forward
+ correctly to the controller.
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
+ from unittest.mock import AsyncMock, MagicMock
+ 
+ import pytest
+ from fastmcp import FastMCP
+@@ -30,54 +30,56 @@ EXPECTED_TOOLS = {
+     "move_effect",
+     "set_param",
+     "bypass",
+     "route",
+     "unroute",
+     "list_io",
+     "alias_input",
+     "find_plugins",
+     "export_rig_state",
+     "import_rig_state",
++    "rig_handles",
+ }
+ 
+ 
+ def _make_mcp_and_controller():
+     """Return a (FastMCP, mock_controller) pair after registering rig tools."""
+     mcp = FastMCP("test")
+     controller = MagicMock()
+     # Async methods need AsyncMock so they are awaitable
+     controller.add_effect = AsyncMock(return_value={"success": True})
+     controller.remove_effect = AsyncMock(return_value={"success": True})
+     controller.move_effect = AsyncMock(return_value={"success": True})
+     controller.set_param = AsyncMock(return_value={"success": True})
+     controller.bypass = AsyncMock(return_value={"success": True})
+     controller.export_rig_state = AsyncMock(return_value={"version": 1, "nodes": [], "edges": []})
+     controller.import_rig_state = AsyncMock(return_value={"success": True, "tracks": []})
++    controller.snapshot_handles = AsyncMock(return_value={"nodes": {}, "errors": []})
+     controller._graph = RigGraph()
+     register_rig_tools(mcp, controller)
+     return mcp, controller
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Registration tests
+ # ---------------------------------------------------------------------------
+ 
+ 
+ class TestToolRegistration:
+-    def test_all_16_tools_are_registered(self):
++    def test_all_17_tools_are_registered(self):
+         mcp, _ = _make_mcp_and_controller()
+         registered = set(mcp._tool_manager._tools.keys())
+         assert EXPECTED_TOOLS == registered
+ 
+-    def test_tool_count_is_exactly_16(self):
++    def test_tool_count_is_exactly_17(self):
+         mcp, _ = _make_mcp_and_controller()
+-        assert len(mcp._tool_manager._tools) == 16
++        assert len(mcp._tool_manager._tools) == 17
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Sync tool forwarding
+ # ---------------------------------------------------------------------------
+ 
+ 
+ class TestSyncToolForwarding:
+     def test_describe_rig_calls_describe_with_graph(self):
+         """describe_rig tool calls describe_rig(controller._graph)."""
+@@ -200,33 +202,33 @@ def _make_mcp_with_probe():
+     controller = MagicMock()
+     controller._graph = RigGraph()
+     probe = MagicMock()
+     probe.play_tone = AsyncMock(return_value={"success": True})
+     probe.measure_level = AsyncMock(return_value={"success": True})
+     register_rig_tools(mcp, controller, probe=probe)
+     return mcp, controller, probe
+ 
+ 
+ class TestProbeRegistration:
+-    def test_probe_omitted_means_only_16_tools(self):
++    def test_probe_omitted_means_only_17_tools(self):
+         mcp = FastMCP("test")
+         controller = MagicMock()
+         controller._graph = RigGraph()
+         register_rig_tools(mcp, controller)
+-        assert len(mcp._tool_manager._tools) == 16
++        assert len(mcp._tool_manager._tools) == 17
+         assert PROBE_TOOLS.isdisjoint(mcp._tool_manager._tools.keys())
+ 
+     def test_probe_adds_three_tools(self):
+         mcp, _, _ = _make_mcp_with_probe()
+         registered = set(mcp._tool_manager._tools.keys())
+         assert EXPECTED_TOOLS | PROBE_TOOLS == registered
+-        assert len(registered) == 19
++        assert len(registered) == 20
+ 
+     def test_play_tone_forwards_to_probe(self):
+         mcp, _, probe = _make_mcp_with_probe()
+         tools = mcp._tool_manager._tools
+         coro = tools["play_tone"].fn(node="strat", hz=440.0, db=-12.0, at="input")
+         result = asyncio.run(coro)
+         probe.play_tone.assert_called_once_with("strat", hz=440.0, db=-12.0, at="input")
+         assert result["success"] is True
+ 
+     def test_stop_tone_forwards_to_probe(self):

@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "carla-mcp": {
-      "command": "uv",
-      "args": ["run", "python3", "source/frontend/carla_mcp/mcp_stdio_bridge.py"],
-      "cwd": "/home/michael/carla-mcp-fork"
+      "command": "pw-jack",
+      "args": ["uv", "run", "python3", "source/frontend/carla_mcp/mcp_stdio_bridge.py"],
+      "cwd": "/home/michael/roboloops/carla-mcp-fork"
     }
   }
 }

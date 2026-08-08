@@ -1,0 +1,105 @@
+=== COMMITS 191696afd..59a8e23a5 ===
+59a8e23a5 feat(looper-mcp): save_session_at and idempotent mute setter tools
+
+=== DIFFSTAT ===
+ .../looper_mcp/tests/test_rig_control_tools.py     | 46 ++++++++++++++++++++++
+ source/frontend/looper_mcp/tools.py                | 19 +++++++++
+ 2 files changed, 65 insertions(+)
+
+=== FULL DIFF (U10) ===
+diff --git a/source/frontend/looper_mcp/tests/test_rig_control_tools.py b/source/frontend/looper_mcp/tests/test_rig_control_tools.py
+new file mode 100644
+index 000000000..4ab36a3da
+--- /dev/null
++++ b/source/frontend/looper_mcp/tests/test_rig_control_tools.py
+@@ -0,0 +1,46 @@
++"""Tests for the managed-rig looper tools: SaveSessionAt and mute setters."""
++
++import asyncio
++from unittest.mock import AsyncMock
++
++from fastmcp import FastMCP
++
++from looper_mcp.tools import register_tools
++
++
++def _server_and_client():
++    server = FastMCP("test")
++    client = AsyncMock()
++    client.send_command = AsyncMock(return_value={"ok": None})
++    register_tools(server, client)
++    return server, client
++
++
++def _tool(server, name):
++    return server._tool_manager._tools[name].fn
++
++
++def test_save_session_at_sends_exact_command():
++    server, client = _server_and_client()
++    result = asyncio.run(_tool(server, "save_session_at")("/abs/dir"))
++    client.send_command.assert_awaited_once_with({"SaveSessionAt": "/abs/dir"})
++    assert result == "OK"
++
++
++def test_set_main_output_mute_sends_bool():
++    server, client = _server_and_client()
++    asyncio.run(_tool(server, "set_main_output_mute")(True))
++    client.send_command.assert_awaited_once_with({"SetMainOutputMute": True})
++
++
++def test_set_all_outputs_mute_sends_bool():
++    server, client = _server_and_client()
++    asyncio.run(_tool(server, "set_all_outputs_mute")(False))
++    client.send_command.assert_awaited_once_with({"SetAllOutputsMute": False})
++
++
++def test_error_response_is_surfaced():
++    server, client = _server_and_client()
++    client.send_command = AsyncMock(return_value={"error": "no session"})
++    result = asyncio.run(_tool(server, "save_session_at")("/abs/dir"))
++    assert result == "Error: no session"
+diff --git a/source/frontend/looper_mcp/tools.py b/source/frontend/looper_mcp/tools.py
+index 06dec7fa6..e865da398 100644
+--- a/source/frontend/looper_mcp/tools.py
++++ b/source/frontend/looper_mcp/tools.py
+@@ -322,20 +322,39 @@ def register_tools(mcp_server, looper_client):
+         """Save looper session to a file path."""
+         result = await looper_client.send_command({"SaveSession": path})
+         return _format_result(result)
+ 
+     @mcp_server.tool()
+     async def load_session(path: str) -> str:
+         """Load a looper session from a file path."""
+         result = await looper_client.send_command({"LoadSession": path})
+         return _format_result(result)
+ 
++    @mcp_server.tool()
++    async def save_session_at(path: str) -> str:
++        """Save the looper session into exactly this directory (created if
++        needed) — no auto-named subdirectory. Used by rig session saves."""
++        result = await looper_client.send_command({"SaveSessionAt": path})
++        return _format_result(result)
++
++    @mcp_server.tool()
++    async def set_main_output_mute(muted: bool) -> str:
++        """Set (not toggle) main output mute — idempotent restore setter."""
++        result = await looper_client.send_command({"SetMainOutputMute": muted})
++        return _format_result(result)
++
++    @mcp_server.tool()
++    async def set_all_outputs_mute(muted: bool) -> str:
++        """Set (not toggle) all-outputs mute — idempotent restore setter."""
++        result = await looper_client.send_command({"SetAllOutputsMute": muted})
++        return _format_result(result)
++
+     @mcp_server.tool()
+     async def get_state() -> str:
+         """Get the current looper engine state (tempo, looper count, levels, etc.)."""
+         import json
+ 
+         state = await looper_client.get_state()
+         return json.dumps(state, indent=2)
+ 
+ 
+ def _format_result(result: dict) -> str:

@@ -1,0 +1,331 @@
+=== COMMITS cb0771ae9..03439fa16 ===
+03439fa16 feat(rig): do_load — clean-slate, converge, verify with one retry round
+
+=== DIFFSTAT ===
+ source/frontend/carla_mcp/rig/converge.py          | 149 ++++++++++++++++++++
+ .../carla_mcp/tests/test_rig_converge_load.py      | 152 +++++++++++++++++++++
+ 2 files changed, 301 insertions(+)
+
+=== FULL DIFF (U10) ===
+diff --git a/source/frontend/carla_mcp/rig/converge.py b/source/frontend/carla_mcp/rig/converge.py
+index f07e3c95b..81c587503 100644
+--- a/source/frontend/carla_mcp/rig/converge.py
++++ b/source/frontend/carla_mcp/rig/converge.py
+@@ -93,10 +93,159 @@ async def do_routing_reset(ops: RigOps) -> str:
+             cleared.append(f"{link.src} -> {link.dst}")
+     verdict = "OK" if not failures else f"DEGRADED: {len(failures)} issues"
+     return render_report(verdict, [("Cleared", cleared), ("Failed", failures)])
+ 
+ 
+ async def do_verify(graph: RigGraph, ops: RigOps) -> str:
+     """Read-only: observe, diff against the desired graph, report."""
+     observed = await ops.observe(graph)
+     d = diff(graph, observed)
+     return render_report(d.verdict, [("Issues", d.issues())])
++
++
++def rig_state_for_import(graph: RigGraph, session_dir: Path) -> dict:
++    """Build an import_rig_state payload from the session graph.
++
++    Edges are deliberately empty: the converge engine owns ALL wiring (the
++    controller must not race it).  Track sources that name loop:N nodes are
++    translated to the "loopers:loopN_out" endpoint base the controller can
++    resolve; chain_file paths are absolutized against the session dir.
++    """
++    nodes: List[dict] = []
++    endpoint_bases: List[str] = []
++
++    def _translate_source(source: Optional[str]) -> Optional[str]:
++        if source and graph.has_node(source):
++            src_node = graph.nodes[source]
++            if src_node.kind == "loop":
++                base = f"loopers:loop{src_node.port_index}_out"
++                if base not in endpoint_bases:
++                    endpoint_bases.append(base)
++                return base
++        return source
++
++    for node in graph.nodes.values():
++        if node.kind not in ("endpoint", "track", "bus"):
++            continue
++        chain_file = node.chain_file
++        if chain_file and not Path(chain_file).is_absolute():
++            chain_file = str(session_dir / chain_file)
++        nodes.append({
++            "name": node.name,
++            "kind": node.kind,
++            "instance": node.instance,
++            "jack_client": node.jack_client,
++            "source": _translate_source(node.source),
++            "effects": [
++                {"role": e.role, "handle": e.handle, "plugin": e.plugin,
++                 "bypassed": e.bypassed}
++                for e in node.effects
++            ],
++            "chain_file": chain_file,
++        })
++    for base in endpoint_bases:
++        if not any(n["name"] == base for n in nodes):
++            nodes.append({"name": base, "kind": "endpoint", "instance": None,
++                          "jack_client": base, "source": None, "effects": [],
++                          "chain_file": None})
++    return {"version": 1, "nodes": nodes, "edges": []}
++
++
++async def _apply_action(action: Action, graph: RigGraph, ops: RigOps,
++                        notes: List[str]) -> None:
++    """Execute one plan action, recording every failure in *notes*."""
++    if action.op == "start_unit":
++        unit = graph.runtime_units.get(action.unit)
++        if unit is None:
++            notes.append(f"start {action.unit}: unknown runtime unit")
++            return
++        err = await ops.start_unit(unit)
++        if err:
++            notes.append(f"start {unit.name}: {err}")
++    elif action.op == "wait_ports":
++        for port in ops.wait_ports(list(action.ports)):
++            notes.append(f"port never appeared: {port}")
++    elif action.op == "disconnect":
++        err = ops.disconnect(action.src, action.dst)
++        if err:
++            notes.append(f"disconnect {action.src} -> {action.dst}: {err}")
++    elif action.op == "connect":
++        err = ops.connect(action.src, action.dst)
++        if err:
++            notes.append(f"connect {action.src} -> {action.dst}: {err}")
++
++
++async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
++    """Load a session: read/migrate -> clean slate -> converge -> verify."""
++    try:
++        sess = read_session(session_dir)
++    except SessionError as exc:
++        return f"FAILED: {exc}"
++    graph = sess.graph
++    notes: List[str] = list(sess.notes)
++
++    # 1. Processes: start every expected unit that is down, in start order.
++    observed = await ops.observe(graph)
++    down = [u for u in graph.runtime_units.values()
++            if not observed.unit_status.get(u.name, False)]
++    for unit in sorted(down, key=lambda u: (UNIT_START_ORDER.get(u.kind, 9), u.name)):
++        err = await ops.start_unit(unit)
++        if err:
++            notes.append(f"start {unit.name}: {err}")
++
++    # 2. Clean slate: beat PipeWire persistent-link restoration.
++    observed = await ops.observe(graph)
++    for link in observed.links:
++        if in_rig_port_space(link.src, link.dst):
++            err = ops.disconnect(link.src, link.dst)
++            if err:
++                notes.append(f"clean-slate {link.src} -> {link.dst}: {err}")
++
++    # 3. Payload: projects, per-track chains, looper session, mutes.
++    if sess.carla_project:
++        err = await ops.load_carla_project(str(session_dir / sess.carla_project))
++        if err:
++            notes.append(f"carla project: {err}")
++    state = rig_state_for_import(graph, session_dir)
++    if any(n["kind"] in ("track", "bus") for n in state["nodes"]):
++        result = await ops.import_rig_state(state, str(session_dir / "chains"))
++        for message in result.get("messages", []):
++            notes.append(f"rig import: {message}")
++    if sess.looper_session_dir:
++        project = session_dir / sess.looper_session_dir / LOOPER_PROJECT
++        err = await ops.load_looper_session(str(project))
++        if err:
++            notes.append(f"looper session: {err}")
++        app = graph.nodes.get("app:looper")
++        if app is not None:
++            err = await ops.set_looper_mutes(app.main_muted, app.all_muted)
++            if err:
++                notes.append(f"looper mutes: {err}")
++
++    # 4. Wait for every canonically-named port before wiring.
++    wanted = sorted({p for n in graph.nodes.values() for p in canonical_ports(n)})
++    for port in ops.wait_ports(wanted):
++        notes.append(f"port never appeared: {port}")
++
++    # 5. Connect every desired pair (missing-only; slate is already clean).
++    observed = await ops.observe(graph)
++    expansion = expand_edges(graph, observed.output_ports, observed.input_ports)
++    for message in expansion.dead_ports:
++        notes.append(message)
++    live = {(l.src, l.dst) for l in observed.links}
++    for pair in expansion.pairs:
++        if (pair.src, pair.dst) in live:
++            continue
++        err = ops.connect(pair.src, pair.dst)
++        if err:
++            notes.append(f"connect {pair.src} -> {pair.dst}: {err}")
++
++    # 6. Verify; one retry round through plan() if not clean.
++    observed = await ops.observe(graph)
++    d = diff(graph, observed)
++    if not d.is_clean:
++        for action in plan(d, graph):
++            await _apply_action(action, graph, ops, notes)
++        observed = await ops.observe(graph)
++        d = diff(graph, observed)
++
++    return render_report(d.verdict, [("Issues", d.issues()), ("Notes", notes)])
+diff --git a/source/frontend/carla_mcp/tests/test_rig_converge_load.py b/source/frontend/carla_mcp/tests/test_rig_converge_load.py
+new file mode 100644
+index 000000000..2ea5d899c
+--- /dev/null
++++ b/source/frontend/carla_mcp/tests/test_rig_converge_load.py
+@@ -0,0 +1,152 @@
++"""Tests for rig/converge.do_load — clean-slate, converge, verify, one retry."""
++
++import asyncio
++import json
++from pathlib import Path
++
++from carla_mcp.rig.converge import RigOps, do_load, rig_state_for_import
++from carla_mcp.rig.graph import Node, RigGraph
++from carla_mcp.rig.observe import Link, ObservedState
++from carla_mcp.rig.session import RigSession, write_session
++
++MON0 = "alsa_output.usb-F-00.pro-output-0:playback_AUX0"
++MON1 = "alsa_output.usb-F-00.pro-output-0:playback_AUX1"
++
++
++def _write_v3_session(tmp_path) -> Path:
++    g = RigGraph()
++    g.add_node(Node(name="loop:0", kind="loop", looper_id=7, port_index=0))
++    g.add_node(Node(name="strat", kind="track", instance="strat",
++                    jack_client="CarlaChain_strat", source="loop:0",
++                    chain_file="chains/strat.carxp"))
++    g.add_node(Node(name="out:main", kind="endpoint"))
++    g.add_node(Node(name="app:looper", kind="app", main_muted=True))
++    g.add_edge("loop:0", "strat")
++    g.add_edge("strat", "out:main")
++    from carla_mcp.rig.graph import RuntimeUnit
++    g.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
++    g.add_runtime_unit(RuntimeUnit(name="carla:strat", kind="carla-child", node="strat"))
++    g.add_runtime_unit(RuntimeUnit(name="looper:engine", kind="looper-engine"))
++    g.add_runtime_unit(RuntimeUnit(name="looper:mcp", kind="looper-mcp"))
++    sdir = tmp_path / "rt"
++    (sdir / "chains").mkdir(parents=True)
++    (sdir / "looper").mkdir()
++    (sdir / "carla_project.carxp").write_text("<carla/>")
++    (sdir / "chains" / "strat.carxp").write_text("<carla/>")
++    (sdir / "looper" / "project.loopers").write_text(json.dumps({"loopers": []}))
++    write_session(RigSession(name="rt", graph=g, carla_project="carla_project.carxp",
++                             looper_session_dir="looper"), sdir)
++    return sdir
++
++
++class LoadFakeOps(RigOps):
++    """Cold world: no units up, no ports, one stale link; start_unit brings ports."""
++
++    def __init__(self):
++        self.units_up = set()
++        self.outputs = set()
++        self.inputs = set([MON0, MON1])
++        self.links = {("loopers:loop0_out_l", "Carla:audio-in1")}  # stale garbage
++        self.calls = []
++
++    async def observe(self, graph):
++        units = list(graph.runtime_units.values()) if graph else []
++        return ObservedState(
++            links=[Link(s, d) for s, d in sorted(self.links)],
++            output_ports=sorted(self.outputs),
++            input_ports=sorted(self.inputs),
++            unit_status={u.name: u.name in self.units_up for u in units},
++        )
++
++    async def start_unit(self, unit):
++        self.calls.append(("start_unit", unit.name))
++        self.units_up.add(unit.name)
++        if unit.kind == "looper-engine":
++            self.outputs |= {"loopers:loop0_out_l", "loopers:loop0_out_r"}
++            self.inputs |= {"loopers:loop0_in_l", "loopers:loop0_in_r",
++                            "loopers:loopers_midi_in"}
++        return None
++
++    def connect(self, src, dst):
++        if src not in self.outputs or dst not in self.inputs:
++            return f"port missing: {src} or {dst}"
++        self.links.add((src, dst))
++        return None
++
++    def disconnect(self, src, dst):
++        self.links.discard((src, dst))
++        return None
++
++    def wait_ports(self, ports, timeout_s=15.0):
++        return [p for p in ports if p not in self.outputs | self.inputs]
++
++    async def load_carla_project(self, path):
++        self.calls.append(("load_carla_project", path))
++        return None
++
++    async def import_rig_state(self, state, chains_dir):
++        self.calls.append(("import_rig_state", [n["name"] for n in state["nodes"]]))
++        # respawning children makes their ports appear
++        for n in state["nodes"]:
++            if n["kind"] in ("track", "bus"):
++                c = n["jack_client"]
++                self.outputs |= {f"{c}:audio-out1", f"{c}:audio-out2"}
++                self.inputs |= {f"{c}:audio-in1", f"{c}:audio-in2"}
++        return {"success": True, "tracks": [], "messages": []}
++
++    async def load_looper_session(self, project_path):
++        self.calls.append(("load_looper_session", project_path))
++        return None
++
++    async def set_looper_mutes(self, main_muted, all_muted):
++        self.calls.append(("set_looper_mutes", main_muted, all_muted))
++        return None
++
++
++class TestDoLoad:
++    def test_cold_load_converges_to_ok(self, tmp_path):
++        sdir = _write_v3_session(tmp_path)
++        ops = LoadFakeOps()
++        report = asyncio.run(do_load("rt", sdir, ops))
++        assert report.splitlines()[0] == "OK", report
++        # stale link clean-slated
++        assert ("loopers:loop0_out_l", "Carla:audio-in1") not in ops.links
++        # desired wiring present, L->L R->R
++        assert ("loopers:loop0_out_l", "CarlaChain_strat:audio-in1") in ops.links
++        assert ("loopers:loop0_out_r", "CarlaChain_strat:audio-in2") in ops.links
++        assert ("CarlaChain_strat:audio-out1", MON0) in ops.links
++        assert ("CarlaChain_strat:audio-out2", MON1) in ops.links
++
++    def test_units_started_in_order(self, tmp_path):
++        sdir = _write_v3_session(tmp_path)
++        ops = LoadFakeOps()
++        asyncio.run(do_load("rt", sdir, ops))
++        starts = [c[1] for c in ops.calls if c[0] == "start_unit"]
++        assert starts == ["looper:engine", "looper:mcp", "carla:main", "carla:strat"]
++
++    def test_payload_restored_with_mutes(self, tmp_path):
++        sdir = _write_v3_session(tmp_path)
++        ops = LoadFakeOps()
++        asyncio.run(do_load("rt", sdir, ops))
++        names = [c[0] for c in ops.calls]
++        assert "load_carla_project" in names
++        assert "import_rig_state" in names
++        assert ("set_looper_mutes", True, False) in ops.calls
++        looper_calls = [c for c in ops.calls if c[0] == "load_looper_session"]
++        assert looper_calls[0][1].endswith("looper/project.loopers")
++
++    def test_missing_session_is_failed_verdict(self, tmp_path):
++        report = asyncio.run(do_load("nope", tmp_path / "nope", LoadFakeOps()))
++        assert report.startswith("FAILED:")
++
++    def test_import_state_has_no_edges_and_translated_sources(self, tmp_path):
++        sdir = _write_v3_session(tmp_path)
++        from carla_mcp.rig.session import read_session
++        sess = read_session(sdir)
++        state = rig_state_for_import(sess.graph, sdir)
++        assert state["edges"] == []
++        strat = [n for n in state["nodes"] if n["name"] == "strat"][0]
++        assert strat["source"] == "loopers:loop0_out"
++        assert strat["chain_file"] == str(sdir / "chains" / "strat.carxp")
++        # loop/app/midi nodes are not Carla-land nodes
++        assert all(n["kind"] in ("endpoint", "track", "bus") for n in state["nodes"])

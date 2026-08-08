@@ -191,3 +191,10 @@ data/windows/python/
 Makefile.user.mk
 
 .worktrees/
+
+# Local secrets, sessions & notes (not part of the repo)
+.env
+projects/
+SESSION-RESUME.md
+PATCHBAY_FIX_PLAN.md
+llm_audio_plugin_guide.md
