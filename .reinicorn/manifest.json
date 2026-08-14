@@ -1,6 +1,6 @@
 {
-  "reinicorn_version": "0.1.dev50+gc8b5512b6.d20260808",
-  "installed_at": "2026-08-08T12:18:07.790046+00:00",
+  "reinicorn_version": "0.1.dev56+g79fe4ed23.d20260814",
+  "installed_at": "2026-08-14T11:32:02.277881+00:00",
   "files": {
     ".agents/skills/ATTRIBUTION.md": {
       "sha256": "58b28c9e02ab54b92b57b9191d45b41d382d9a80efdb6168ea90be89793f3f98"
@@ -150,13 +150,19 @@
       "sha256": "abe726d4b5fe961986f22989b0147637471b2a69220a56c23c4e64b5cafc5a7e"
     },
     ".claude/hooks/post-checkout": {
-      "sha256": "7eea5490e19095ddd98eecf80fa570a97e081eb851ceaa42b9deff7970027fb9"
+      "sha256": "bc64cc355bb972801f7d30f512873a4e044c57114139ad2904f722900583926e"
     },
     ".claude/hooks/post-merge": {
-      "sha256": "1b9483b357070df789d3092434a437adf2aa904ec42564464262af42d60232dc"
+      "sha256": "e3353e6a3a1507004b4e585cfceaec5d5cb71571788f4d1e67a08ff52482b427"
     },
     ".claude/hooks/pre-push": {
-      "sha256": "439621aa76df181d868ed447c7c2451fad38a892e06cf6549fc0ac9f2aa0667e"
+      "sha256": "cfad4810c4230772758cefaa0c9c005c2cc0e11b50301f32721f6eb28fd0ed10"
+    },
+    ".reinicorn/hooks/block-raw-kb-git.sh": {
+      "sha256": "179772a01d874b8b57ebcab092a0cd27dcb2a6e28d11d6a8799bb0db67521ef0"
+    },
+    ".reinicorn/hooks/enforce-doc-templates.sh": {
+      "sha256": "a1745f21a7ed92c1156497351c9024448a033022a02866f34581a8b0c254b719"
     },
     "linters/.lint-config.json": {
       "sha256": "1218d747b06054afc95f95960e6de48151d09a79a1d0f36082f118b76f37536c"

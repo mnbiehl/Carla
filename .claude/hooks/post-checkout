@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# post-checkout — reins git hook
+# post-checkout — Reinicorn git hook
 #
 # Runs after `git checkout` and `git worktree add`. Responsibilities:
 #   1. Ensure kb submodule exists (fresh clone / new worktree)
-#   2. On new branch checkout, suggest `reins plan create`
+#   2. On new branch checkout, suggest `rcorn plan create`
 #
-# Delegates all logic to `reins _post-checkout` (Python).
+# Delegates all logic to `rcorn _post-checkout` (Python).
 #
 # Arguments (provided by git):
 #   $1 = previous HEAD ref
@@ -14,8 +14,8 @@
 #   $3 = flag: "1" = branch checkout, "0" = file checkout
 # =============================================================================
 
-if command -v reins &>/dev/null; then
-    reins _post-checkout "$1" "$2" "$3" 2>/dev/null || true
+if command -v rcorn &>/dev/null; then
+    rcorn _post-checkout "$1" "$2" "$3" 2>/dev/null || true
 fi
 
 exit 0
