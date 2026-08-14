@@ -1,6 +1,6 @@
 name: dpf
 
-on: [push, pull_request]
+on: [workflow_dispatch]
 
 env:
   PAWPAW_SKIP_LTO: 1
