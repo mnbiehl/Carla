@@ -2,5 +2,8 @@
   "rig_up": {"params": ["session"], "annotations": {"idempotentHint": true}},
   "rig_down": {"params": [], "annotations": {"destructiveHint": true}},
   "rig_state": {"params": ["focus", "detail", "compare"], "annotations": {"readOnlyHint": true}},
-  "rig_reset_routing": {"params": ["dry_run"], "annotations": {"destructiveHint": true}}
+  "rig_reset_routing": {"params": ["dry_run"], "annotations": {"destructiveHint": true}},
+  "session_save": {"params": ["name", "overwrite"], "annotations": {}},
+  "session_load": {"params": ["name"], "annotations": {"destructiveHint": true}},
+  "session_list": {"params": [], "annotations": {"readOnlyHint": true}}
 }
