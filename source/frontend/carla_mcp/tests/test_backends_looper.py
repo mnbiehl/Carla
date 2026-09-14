@@ -50,6 +50,14 @@ def test_engine_error_raises_rpc_error():
     assert exc.value.type == "internal" and "no such looper" in exc.value.message
 
 
+def test_get_state_raises_when_state_envelope_missing():
+    client, _ = _client({"ok": True})
+    with pytest.raises(RpcError) as exc:
+        asyncio.run(client.get_state())
+    assert exc.value.type == "internal"
+    assert "state" in exc.value.message
+
+
 def test_loopers_skips_entries_without_port_index():
     client, _ = _client({"state": {"loopers": [{"id": 1}, {"id": 2, "port_index": 1}]}})
     assert [l["id"] for l in asyncio.run(client.loopers())] == [2]

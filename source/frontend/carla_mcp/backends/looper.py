@@ -8,7 +8,7 @@ for loopN_* port names.
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
+from typing import Any, List
 
 from carla_mcp.backends.rpc import JsonLinesTransport, RpcError
 
@@ -39,7 +39,9 @@ class LooperClient:
 
     async def get_state(self) -> dict:
         reply = await self.command("GetState")
-        state = reply.get("state") if isinstance(reply.get("state"), dict) else reply
+        state = reply.get("state")
+        if not isinstance(state, dict):
+            raise RpcError("internal", "GetState reply missing 'state' envelope")
         return state
 
     async def loopers(self) -> List[dict]:
