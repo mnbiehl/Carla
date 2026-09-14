@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Optional, Protocol
 
 from carla_mcp.backends.carla import CarlaClient
 from carla_mcp.backends.looper import LooperClient
@@ -12,7 +12,12 @@ from carla_mcp.backends.rpc import CarlaRpc, JsonLinesTransport
 from carla_mcp.bridge.config import BridgeConfig
 from carla_mcp.rig.graph import RigGraph
 
-LegacySse = Callable[[str, str, dict], Awaitable[Any]]
+
+class LegacySse(Protocol):
+    """Callable shape of backends.legacy_sse.call_tool (phase-1 shim)."""
+
+    def __call__(self, url: str, name: str, args: dict,
+                 timeout: Optional[float] = None) -> Awaitable[Any]: ...
 
 
 @dataclass
@@ -60,7 +65,7 @@ class Bridge:
         test_env.update(env or {})
         cfg = BridgeConfig.from_env(test_env)
 
-        async def _no_sse(url, name, args):
+        async def _no_sse(url, name, args, timeout=None):
             return None
 
         return cls(

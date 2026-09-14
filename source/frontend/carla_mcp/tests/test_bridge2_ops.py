@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from carla_mcp.backends.legacy_sse import LEGACY_SSE_LONG_TIMEOUT_S
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.ops import BridgeOps
@@ -59,8 +60,8 @@ def test_carla_project_and_looper_payload_translate_errors_to_strings():
 def test_export_import_go_through_legacy_sse_shim():
     calls = []
 
-    async def fake_sse(url, name, args):
-        calls.append((name, args))
+    async def fake_sse(url, name, args, timeout=None):
+        calls.append((name, args, timeout))
         return {"nodes": []} if name == "export_rig_state" else {"messages": ["m"]}
 
     b = _bridge(legacy_sse=fake_sse)
@@ -68,7 +69,10 @@ def test_export_import_go_through_legacy_sse_shim():
     with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
         assert asyncio.run(ops.export_rig_state("/chains")) == {"nodes": []}
         assert asyncio.run(ops.import_rig_state({"nodes": []}, "/chains")) == {"messages": ["m"]}
-    assert calls[0] == ("export_rig_state", {"chains_dir": "/chains"})
+    assert calls[0] == ("export_rig_state", {"chains_dir": "/chains"}, LEGACY_SSE_LONG_TIMEOUT_S)
+    assert calls[1] == (
+        "import_rig_state", {"state": {"nodes": []}, "chains_dir": "/chains"}, LEGACY_SSE_LONG_TIMEOUT_S
+    )
     with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False):
         assert asyncio.run(ops.export_rig_state("/chains")) is None
 
@@ -79,7 +83,36 @@ def test_export_import_translate_rpc_error_from_legacy_sse():
     with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
         result = asyncio.run(ops.import_rig_state({"nodes": []}, "/chains"))
         assert result["messages"] and "boom" in result["messages"][0]
+        # Carla was reachable but the call itself failed: the real message
+        # comes back (not silently collapsed to None / "carla not reachable").
+        export = asyncio.run(ops.export_rig_state("/chains"))
+        assert export is not None and "nodes" not in export
+        assert "boom" in export["error"]
+
+
+def test_export_returns_none_only_when_carla_actually_unreachable():
+    b = _bridge(legacy_sse=AsyncMock(side_effect=RpcError("internal", "should not be called")))
+    ops = BridgeOps(b)
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False):
         assert asyncio.run(ops.export_rig_state("/chains")) is None
+
+
+def test_rig_handles_and_remove_node_use_default_timeout():
+    calls = []
+
+    async def fake_sse(url, name, args, timeout=None):
+        calls.append((name, timeout))
+        return {"success": True} if name == "remove_node" else {"nodes": {}}
+
+    b = _bridge(legacy_sse=fake_sse)
+    ops = BridgeOps(b)
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
+        asyncio.run(ops.observe(_graph()))
+        unit = RuntimeUnit(name="carla:strat", kind="carla-child", node="strat")
+        asyncio.run(ops.stop_unit(unit))
+    names = dict(calls)
+    assert names["rig_handles"] is None
+    assert names["remove_node"] is None
 
 
 def test_start_and_stop_dispatch_by_kind():

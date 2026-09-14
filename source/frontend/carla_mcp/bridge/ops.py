@@ -6,6 +6,7 @@ import time
 from typing import List, Optional, Sequence
 
 from carla_mcp.backends import pw_link
+from carla_mcp.backends.legacy_sse import LEGACY_SSE_LONG_TIMEOUT_S
 from carla_mcp.backends.processes import a2j_running, ports_present, tcp_reachable
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
@@ -140,7 +141,8 @@ class BridgeOps(RigOps):
     async def import_rig_state(self, state: dict, chains_dir: str) -> dict:
         try:
             result = await self.b.legacy_sse(self.b.config.carla_sse_url, "import_rig_state",
-                                             {"state": state, "chains_dir": chains_dir})
+                                             {"state": state, "chains_dir": chains_dir},
+                                             timeout=LEGACY_SSE_LONG_TIMEOUT_S)
         except RpcError as exc:
             return {"messages": [f"import_rig_state failed: {exc.message}"]}
         return result if isinstance(result, dict) else {"messages": []}
@@ -150,9 +152,14 @@ class BridgeOps(RigOps):
             return None
         try:
             result = await self.b.legacy_sse(self.b.config.carla_sse_url, "export_rig_state",
-                                             {"chains_dir": chains_dir})
-        except RpcError:
-            return None
+                                             {"chains_dir": chains_dir},
+                                             timeout=LEGACY_SSE_LONG_TIMEOUT_S)
+        except RpcError as exc:
+            # Distinct from "carla not reachable": the port answered, the
+            # tool call itself failed (timeout, isError). No "nodes" key,
+            # so do_save reports the real reason instead of misreporting
+            # this as carla being down.
+            return {"error": f"export_rig_state failed: {exc.message}"}
         return result if isinstance(result, dict) else None
 
     # ----- looper payload -------------------------------------------------

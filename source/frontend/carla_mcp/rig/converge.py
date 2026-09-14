@@ -314,7 +314,7 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
     looper_dir: Optional[str] = None
 
     export = await ops.export_rig_state(str(session_dir / "chains"))
-    if export is not None:
+    if export is not None and "nodes" in export:
         _graph_from_export(export, graph, session_dir, notes)
         err = await ops.save_carla_project(str(session_dir / "carla_project.carxp"))
         if err is None:
@@ -322,6 +322,10 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
         else:
             notes.append(f"carla project save: {err}")
         graph.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
+    elif export is not None:
+        # Carla was reachable but the export call itself failed (timeout,
+        # tool error): report the real reason, not "carla not reachable".
+        notes.append(str(export.get("error", "carla export failed; no Carla state saved")))
     else:
         notes.append("carla not reachable; no Carla state saved")
 

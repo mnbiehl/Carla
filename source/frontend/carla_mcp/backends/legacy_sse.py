@@ -8,7 +8,7 @@ server.  Nothing else may use this module.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 import anyio
 from mcp import ClientSession
@@ -17,6 +17,10 @@ from mcp.client.sse import sse_client
 from carla_mcp.backends.rpc import RpcError
 
 LEGACY_SSE_TIMEOUT_S = 30.0
+# import_rig_state / export_rig_state settle each track/bus for 2-5s and may
+# block on a child project load (up to 10s); a real 5-track session can take
+# 15-40s. rig_handles / remove_node stay on the short default.
+LEGACY_SSE_LONG_TIMEOUT_S = 120.0
 
 
 def _unwrap(exc: BaseException) -> BaseException:
@@ -26,21 +30,27 @@ def _unwrap(exc: BaseException) -> BaseException:
     return exc
 
 
-async def call_tool(url: str, name: str, args: dict) -> Any:
+async def call_tool(url: str, name: str, args: dict, timeout: Optional[float] = None) -> Any:
+    deadline = LEGACY_SSE_TIMEOUT_S if timeout is None else timeout
     try:
-        with anyio.fail_after(LEGACY_SSE_TIMEOUT_S):
+        with anyio.fail_after(deadline):
             async with sse_client(url) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(name, args)
     except TimeoutError as exc:
         raise RpcError("backend_unavailable",
-                       f"{name} timed out after {LEGACY_SSE_TIMEOUT_S:.0f}s") from exc
+                       f"{name} timed out after {deadline:.0f}s") from exc
     except BaseExceptionGroup as exc:  # noqa: BLE001 — legacy boundary, gone in phase 2
+        _, non_exceptions = exc.split(Exception)
+        if non_exceptions is not None:
+            # KeyboardInterrupt / SystemExit (or any other non-Exception
+            # BaseException) hiding in the group: not ours to swallow.
+            raise
         cause = _unwrap(exc)
         if isinstance(cause, TimeoutError):
             raise RpcError("backend_unavailable",
-                           f"{name} timed out after {LEGACY_SSE_TIMEOUT_S:.0f}s") from cause
+                           f"{name} timed out after {deadline:.0f}s") from cause
         raise RpcError("backend_unavailable", f"legacy sse {name}: {cause}") from cause
     except Exception as exc:  # noqa: BLE001 — legacy boundary, gone in phase 2
         raise RpcError("backend_unavailable", f"legacy sse {name}: {exc}") from exc

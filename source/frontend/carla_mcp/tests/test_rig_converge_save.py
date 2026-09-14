@@ -134,6 +134,14 @@ class TestDoSave:
         sess = read_session(sdir)
         assert sess.graph.get_node("loop:0").looper_id == 7
 
+    def test_export_call_failure_reports_real_reason_not_carla_down(self, tmp_path):
+        class ExportFailedOps(SaveFakeOps):
+            async def export_rig_state(self, chains_dir):
+                return {"error": "export_rig_state failed: timed out after 120s"}
+        report = asyncio.run(do_save("s", tmp_path / "s", ExportFailedOps()))
+        assert "timed out after 120s" in report
+        assert "carla not reachable" not in report
+
     def test_missing_referenced_file_degrades(self, tmp_path):
         class NoChainOps(SaveFakeOps):
             async def export_rig_state(self, chains_dir):
