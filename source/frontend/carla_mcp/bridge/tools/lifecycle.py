@@ -10,9 +10,9 @@ from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.ops import BridgeOps
 from carla_mcp.bridge.result import ToolError, ok, tool_boundary
 from carla_mcp.bridge.tools import ToolSpec, exclusive
-from carla_mcp.rig.converge import do_routing_reset, do_stop
+from carla_mcp.rig.converge import Action, do_rewire, do_stop
 from carla_mcp.rig.graph import RigGraph, RuntimeUnit
-from carla_mcp.rig.reconcile import UNIT_START_ORDER, in_rig_port_space
+from carla_mcp.rig.reconcile import UNIT_START_ORDER
 from carla_mcp.rig.session import SessionError, read_session
 from carla_mcp.rig.state_view import DETAILS, build_state
 
@@ -50,6 +50,19 @@ def _session_guard_units_up(b: Bridge) -> List[str]:
     ops = BridgeOps(b)
     return [name for name, kind in SESSION_GUARD_UNITS
             if ops.unit_probe(RuntimeUnit(name=name, kind=kind))]
+
+
+NO_SESSION_TO_RESET_MESSAGE = "no session loaded; nothing to reset routing to (use session_load)"
+
+
+def _loaded_graph(b: Bridge) -> RigGraph:
+    if b.graph is None:
+        raise ToolError("validation", NO_SESSION_TO_RESET_MESSAGE)
+    return b.graph
+
+
+def _links(actions: List[Action], op: str) -> List[dict]:
+    return [{"src": a.src, "dst": a.dst} for a in actions if a.op == op]
 
 
 def build(b: Bridge) -> List[ToolSpec]:
@@ -124,15 +137,26 @@ def build(b: Bridge) -> List[ToolSpec]:
 
     @tool_boundary
     async def rig_reset_routing(dry_run: bool = False) -> dict:
-        """Disconnect every live link in rig port space (loopers/Carla). Use when
-        PipeWire restored stale links. `dry_run` lists what would be cut."""
+        """Rewire the rig to the loaded session's routing. Disconnects every rig-space link
+        (loopers/Carla) the session does not want, hand-made ones included, then connects
+        the session's missing edges. Only links change: no process is started or stopped,
+        Carla and the looper are not reloaded, and loops in memory are untouched. Refuses
+        when no session is loaded. Down units, absent nodes and dead ports cannot be fixed
+        by rewiring and are reported. `dry_run` lists the planned disconnects and connects
+        without applying them."""
         if dry_run:
-            observed = await BridgeOps(b).observe(None)
-            links = [{"src": l.src, "dst": l.dst} for l in observed.links
-                     if in_rig_port_space(l.src, l.dst)]
-            return ok({"dry_run": True, "would_disconnect": links})
+            rewire = await do_rewire(_loaded_graph(b), BridgeOps(b), dry_run=True)
+            return ok({"dry_run": True,
+                       "would_disconnect": _links(rewire.planned, "disconnect"),
+                       "would_connect": _links(rewire.planned, "connect"),
+                       "not_fixable_by_rewiring": rewire.unfixable})
         async with exclusive(b):
-            return ok({"dry_run": False, "report": await do_routing_reset(BridgeOps(b))})
+            rewire = await do_rewire(_loaded_graph(b), BridgeOps(b))
+            return ok({"dry_run": False,
+                       "verdict": rewire.diff.verdict,
+                       "disconnected": _links(rewire.applied, "disconnect"),
+                       "connected": _links(rewire.applied, "connect"),
+                       "report": rewire.report()}, notes=rewire.failures)
 
     return [
         ToolSpec("rig_up", rig_up, {"idempotentHint": True}),

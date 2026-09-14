@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.tools import lifecycle
-from carla_mcp.rig.graph import RigGraph, RuntimeUnit
+from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import Link, ObservedState
 from carla_mcp.rig.session import RigSession, write_session
 
@@ -186,16 +186,140 @@ def test_rig_down_with_units_already_down_is_ok_and_clears_graph():
     assert b.graph is None and b.session_name is None
 
 
-def test_rig_reset_routing_dry_run_lists_links():
+# ----- rig_reset_routing: rewire to the loaded session (links only) -----------
+
+MON0 = "alsa_output.usb-F-00.pro-output-0:playback_AUX0"
+MON1 = "alsa_output.usb-F-00.pro-output-0:playback_AUX1"
+STRAY = ("loopers:loop1_out_l", "Carla:audio-in3")
+DESKTOP = ("Firefox:output_FL", MON0)
+KEPT = ("loopers:loop0_out_l", "Carla:audio-in1")
+MISSING = [("loopers:loop0_out_r", "Carla:audio-in2")]
+
+
+class FakePipeWire:
+    OUTPUTS = ["loopers:loop0_out_l", "loopers:loop0_out_r", "loopers:loop1_out_l", "Firefox:output_FL"]
+    INPUTS = ["Carla:audio-in1", "Carla:audio-in2", "Carla:audio-in3", MON0, MON1]
+
+    def __init__(self, links):
+        self.links = set(links)
+        self.connected, self.disconnected = [], []
+
+    def list_links(self):
+        return sorted(self.links)
+
+    def list_outputs(self):
+        return list(self.OUTPUTS)
+
+    def list_inputs(self):
+        return list(self.INPUTS)
+
+    def connect(self, src, dst):
+        self.links.add((src, dst)); self.connected.append((src, dst))
+
+    def disconnect(self, src, dst):
+        self.links.discard((src, dst)); self.disconnected.append((src, dst))
+
+
+def _session_graph():
+    """loop:0 -> Carla main (explicit ports), plus a2j as a runtime unit."""
+    g = RigGraph()
+    g.add_node(Node(name="loop:0", kind="loop", port_index=0))
+    g.add_node(Node(name="Carla", kind="endpoint", jack_client="Carla:audio-in"))
+    g.add_edge("loop:0", "Carla", src_port="loopers:loop0_out_l", dst_port="Carla:audio-in1")
+    g.add_edge("loop:0", "Carla", src_port="loopers:loop0_out_r", dst_port="Carla:audio-in2")
+    g.add_runtime_unit(RuntimeUnit(name="a2j", kind="a2j"))
+    return g
+
+
+def _rewire(b, pw, **kwargs):
+    """Run rig_reset_routing through the real do_rewire + BridgeOps over a fake
+    PipeWire; every process, Carla and looper side effect is a tripwire."""
+    forbidden = AsyncMock(side_effect=AssertionError("rig_reset_routing must only change links"))
+    tripwires = {
+        name: patch(f"carla_mcp.bridge.ops.BridgeOps.{name}", new=forbidden)
+        for name in ("start_unit", "stop_unit", "load_carla_project", "import_rig_state",
+                     "load_looper_session", "set_looper_mutes", "looper_save_session_at")
+    }
+    b.looper.get_state = AsyncMock(return_value={"loopers": []})
+    with patch("carla_mcp.backends.pw_link.list_links", side_effect=pw.list_links), \
+         patch("carla_mcp.backends.pw_link.list_outputs", side_effect=pw.list_outputs), \
+         patch("carla_mcp.backends.pw_link.list_inputs", side_effect=pw.list_inputs), \
+         patch("carla_mcp.backends.pw_link.connect", side_effect=pw.connect), \
+         patch("carla_mcp.backends.pw_link.disconnect", side_effect=pw.disconnect), \
+         patch("carla_mcp.bridge.ops.BridgeOps.wait_ports", side_effect=AssertionError("no waits")), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.ops.a2j_running", return_value=False), \
+         patch.object(b.processes, "spawn", side_effect=AssertionError("no spawn")), \
+         patch.object(b.processes, "stop", side_effect=AssertionError("no stop")), \
+         tripwires["start_unit"], tripwires["stop_unit"], tripwires["load_carla_project"], \
+         tripwires["import_rig_state"], tripwires["load_looper_session"], \
+         tripwires["set_looper_mutes"], tripwires["looper_save_session_at"]:
+        out = asyncio.run(_tools(b)["rig_reset_routing"].fn(**kwargs))
+    assert forbidden.await_count == 0
+    return out
+
+
+def test_rig_reset_routing_without_session_is_validation_and_touches_nothing():
     b = _bridge()
-    obs = _observed(links=[("loopers:loop0_out_l", "Carla:audio-in3"), ("alsa:a", "alsa:b")])
-    with patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=obs)):
-        out = asyncio.run(_tools(b)["rig_reset_routing"].fn(dry_run=True))
-    assert out["result"] == {"dry_run": True,
-                             "would_disconnect": [{"src": "loopers:loop0_out_l", "dst": "Carla:audio-in3"}]}
-    with patch("carla_mcp.bridge.tools.lifecycle.do_routing_reset", new=AsyncMock(return_value="OK")) as reset:
-        out = asyncio.run(_tools(b)["rig_reset_routing"].fn())
-    assert out["result"] == {"dry_run": False, "report": "OK"} and reset.await_count == 1
+    with patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock()) as observe:
+        for dry_run in (True, False):
+            out = asyncio.run(_tools(b)["rig_reset_routing"].fn(dry_run=dry_run))
+            assert out["ok"] is False and out["error"] == {
+                "type": "validation", "message": lifecycle.NO_SESSION_TO_RESET_MESSAGE}
+            assert out["error"]["message"] == \
+                "no session loaded; nothing to reset routing to (use session_load)"
+    observe.assert_not_awaited()
+    assert not b.lock.locked()
+
+
+def test_rig_reset_routing_dry_run_lists_planned_disconnects_and_connects_only():
+    b = _bridge()
+    b.graph = _session_graph()
+    pw = FakePipeWire({KEPT, STRAY, DESKTOP})
+    out = _rewire(b, pw, dry_run=True)
+    assert out["ok"] is True, out
+    assert out["result"] == {
+        "dry_run": True,
+        "would_disconnect": [{"src": STRAY[0], "dst": STRAY[1]}],
+        "would_connect": [{"src": s, "dst": d} for s, d in MISSING],
+        "not_fixable_by_rewiring": ["down unit: a2j"],
+    }
+    assert pw.connected == [] and pw.disconnected == []
+    assert pw.links == {KEPT, STRAY, DESKTOP}
+
+
+def test_rig_reset_routing_rewires_to_the_loaded_session_and_changes_nothing_else():
+    b = _bridge()
+    g = _session_graph()
+    b.graph = g; b.session_name = "tues"
+    pw = FakePipeWire({KEPT, STRAY, DESKTOP})
+    out = _rewire(b, pw)
+    assert out["ok"] is True, out
+    assert pw.disconnected == [STRAY]
+    assert pw.connected == MISSING
+    assert pw.links == {KEPT, DESKTOP, *MISSING}    # desktop link left alone
+    res = out["result"]
+    assert res["dry_run"] is False
+    assert res["disconnected"] == [{"src": STRAY[0], "dst": STRAY[1]}]
+    assert res["connected"] == [{"src": s, "dst": d} for s, d in MISSING]
+    # Rewiring cannot start a2j: reported, never fixed.
+    assert res["verdict"] == "DEGRADED: 1 issues"
+    assert res["report"].splitlines()[0] == "DEGRADED: 1 issues"
+    assert "down unit: a2j" in res["report"]
+    assert out["notes"] == []
+    assert b.graph is g and b.session_name == "tues" and not b.lock.locked()
+
+
+def test_rig_reset_routing_connect_failure_is_a_note():
+    b = _bridge()
+    b.graph = _session_graph()
+    pw = FakePipeWire({KEPT})
+    pw.connect = lambda src, dst: "device busy"
+    out = _rewire(b, pw)
+    assert out["ok"] is True
+    assert out["notes"] == [f"connect {MISSING[0][0]} -> {MISSING[0][1]}: device busy"]
+    assert out["result"]["connected"] == []
+    assert out["result"]["verdict"] == "DEGRADED: 2 issues"
 
 
 # ----- C1: rig_up(session=...) only loads onto a cold rig ---------------------

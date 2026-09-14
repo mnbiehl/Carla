@@ -5,9 +5,13 @@ from unittest.mock import AsyncMock, patch
 
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.tools import BUSY_MESSAGE, lifecycle, sessions
+from carla_mcp.rig.converge import Rewire
+from carla_mcp.rig.graph import RigGraph
 from carla_mcp.rig.observe import ObservedState
+from carla_mcp.rig.reconcile import RigDiff
 
 EMPTY = ObservedState(links=[], output_ports=[], input_ports=[], unit_status={})
+REWIRE = Rewire(planned=[], diff=RigDiff())
 
 
 def _bridge():
@@ -33,6 +37,7 @@ def test_bridges_have_independent_locks():
 
 def test_mutating_tools_fail_fast_while_a_save_holds_the_lock():
     b = _bridge()
+    b.graph = RigGraph()  # rig_reset_routing needs a loaded session to plan against
     t = _tools(b)
 
     async def run():
@@ -47,7 +52,7 @@ def test_mutating_tools_fail_fast_while_a_save_holds_the_lock():
         stop = AsyncMock(return_value="OK\n")
         with patch("carla_mcp.bridge.tools.sessions.do_save", new=blocking_save), \
              patch("carla_mcp.bridge.tools.lifecycle.do_stop", new=stop), \
-             patch("carla_mcp.bridge.tools.lifecycle.do_routing_reset", new=AsyncMock(return_value="OK")), \
+             patch("carla_mcp.bridge.tools.lifecycle.do_rewire", new=AsyncMock(return_value=REWIRE)), \
              patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=EMPTY)):
             save = asyncio.ensure_future(t["session_save"].fn("tues"))
             await asyncio.wait_for(entered.wait(), 2)

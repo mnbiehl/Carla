@@ -12,13 +12,14 @@ stdlib-only: imported by the main Carla process (system Python).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import ObservedState, loop_nodes_from_looper_state
 from carla_mcp.rig.reconcile import (
-    Action, LOOPER_MIDI_IN, UNIT_START_ORDER, canonical_ports, diff,
+    Action, LOOPER_MIDI_IN, UNIT_START_ORDER, RigDiff, canonical_ports, diff,
     expand_edges, in_rig_port_space, plan, render_report,
 )
 from carla_mcp.rig.session import (
@@ -250,6 +251,71 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
         d = diff(graph, observed)
 
     return render_report(d.verdict, [("Issues", d.issues()), ("Notes", notes)])
+
+
+# The plan() steps a rewire may take. start_unit and wait_ports are dropped:
+# a rewire never changes processes and never blocks waiting for ports.
+REWIRE_OPS = ("disconnect", "connect")
+
+
+def _link_text(action: Action) -> str:
+    return f"{action.src} -> {action.dst}"
+
+
+@dataclass
+class Rewire:
+    """Outcome of do_rewire.
+
+    `planned` is the disconnect/connect subset of plan() for the first
+    observation, disconnects first. `applied` holds the actions that succeeded
+    and `failures` the ones that did not; both stay empty on a dry run.
+    `diff` is the post-rewire diff, or the pre-rewire one on a dry run.
+    """
+
+    planned: List[Action]
+    diff: RigDiff
+    applied: List[Action] = field(default_factory=list)
+    failures: List[str] = field(default_factory=list)
+
+    @property
+    def unfixable(self) -> List[str]:
+        """Issues no link change can fix: down units, absent nodes, dead ports,
+        unresolved effects."""
+        return replace(self.diff, missing_edges=[], unexpected_connections=[]).issues()
+
+    def report(self) -> str:
+        return render_report(self.diff.verdict, [
+            ("Disconnected", [_link_text(a) for a in self.applied if a.op == "disconnect"]),
+            ("Connected", [_link_text(a) for a in self.applied if a.op == "connect"]),
+            ("Issues", self.diff.issues()),
+            ("Failures", self.failures),
+        ])
+
+
+async def do_rewire(graph: RigGraph, ops: RigOps, dry_run: bool = False) -> Rewire:
+    """Put rig routing back to *graph* by changing links only.
+
+    Disconnects live rig-space links the graph does not want and connects its
+    missing port pairs, using the same diff() -> plan() -> _apply_action path
+    as do_load's verify-and-retry step. Never starts or stops units, never
+    waits for ports, never loads Carla or looper payload. With *dry_run* the
+    plan is returned and nothing is applied.
+    """
+    d = diff(graph, await ops.observe(graph))
+    planned = [a for a in plan(d, graph) if a.op in REWIRE_OPS]
+    if dry_run:
+        return Rewire(planned=planned, diff=d)
+    applied: List[Action] = []
+    failures: List[str] = []
+    for action in planned:
+        errors: List[str] = []
+        await _apply_action(action, graph, ops, errors)
+        if errors:
+            failures.extend(errors)
+        else:
+            applied.append(action)
+    after = diff(graph, await ops.observe(graph))
+    return Rewire(planned=planned, diff=after, applied=applied, failures=failures)
 
 
 _LOOP_PORT_RE = re.compile(r"^loopers:loop(\d+)_(in|out)_(l|r)$")
