@@ -118,7 +118,15 @@ def test_rig_handles_and_remove_node_use_default_timeout():
 
     b = _bridge(legacy_sse=fake_sse)
     ops = BridgeOps(b)
-    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
+    # observe()/unit_probe() go through pw_link + a2j_running for real
+    # (pw-link -o/-i/-l, pgrep -x a2jmidid) unless mocked; this rig-isolation
+    # guard would (rightly) trip on that, so mock them all here like the
+    # other BridgeOps.observe tests in this file do.
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True), \
+         patch("carla_mcp.bridge.ops.pw_link.list_links", return_value=[]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_outputs", return_value=[]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_inputs", return_value=[]), \
+         patch("carla_mcp.bridge.ops.a2j_running", return_value=False):
         asyncio.run(ops.observe(_graph()))
         unit = RuntimeUnit(name="carla:strat", kind="carla-child", node="strat")
         asyncio.run(ops.stop_unit(unit))
