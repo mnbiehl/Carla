@@ -218,10 +218,62 @@ def test_param_set_non_numeric_value_is_validation():
     host.set_parameter_value.assert_not_called()
 
 
-def test_patchbay_connect_non_int_is_validation():
+def test_param_id_non_int_is_validation():
+    """Test that non-int param_id in param_get or param_set raises validation error."""
+    api = _api()
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("param_get", {"plugin_id": 0, "param_id": "3"})
+    assert exc.value.type == "validation"
+    assert "param_id" in exc.value.message
+
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("param_set", {"plugin_id": 0, "param_id": "3", "value": -3.0})
+    assert exc.value.type == "validation"
+    assert "param_id" in exc.value.message
+
+
+@pytest.mark.parametrize("arg_name,arg_value", [
+    ("group_out", "1"),
+    ("group_out", True),
+    ("port_out", "2"),
+    ("port_out", False),
+    ("group_in", 3.14),
+    ("port_in", [4]),
+])
+def test_patchbay_connect_all_args_non_int_is_validation(arg_name, arg_value):
+    """Test that non-int args in patchbay_connect raise validation error."""
+    host = _host()
+    api = _api(host)
+    params = {"group_out": 1, "port_out": 2, "group_in": 3, "port_in": 4}
+    params[arg_name] = arg_value
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("patchbay_connect", params)
+    assert exc.value.type == "validation"
+    assert arg_name in exc.value.message
+    host.patchbay_connect.assert_not_called()
+
+
+def test_patchbay_disconnect_non_int_connection_id_is_validation():
+    """Test that non-int connection_id in patchbay_disconnect raises validation error."""
     host = _host()
     api = _api(host)
     with pytest.raises(RpcError) as exc:
-        api.dispatch("patchbay_connect", {"group_out": "1", "port_out": 2, "group_in": 3, "port_in": 4})
+        api.dispatch("patchbay_disconnect", {"connection_id": "42"})
     assert exc.value.type == "validation"
-    host.patchbay_connect.assert_not_called()
+    assert "connection_id" in exc.value.message
+    host.patchbay_disconnect.assert_not_called()
+
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("patchbay_disconnect", {"connection_id": True})
+    assert exc.value.type == "validation"
+    assert "connection_id" in exc.value.message
+    host.patchbay_disconnect.assert_not_called()
+
+
+def test_patchbay_disconnect_valid_connection_id_calls_host():
+    """Test that patchbay_disconnect with valid connection_id calls host and returns result."""
+    host = _host()
+    api = _api(host)
+    result = api.dispatch("patchbay_disconnect", {"connection_id": 42})
+    assert result == {"disconnected": 42}
+    host.patchbay_disconnect.assert_called_once_with(False, 42)
