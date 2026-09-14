@@ -8,11 +8,13 @@ for loopN_* port names.
 from __future__ import annotations
 
 import json
-from typing import Any, List
+from typing import Any, List, Optional
 
 from carla_mcp.backends.rpc import JsonLinesTransport, RpcError
 
 _LOOPER_FIELDS = ("id", "name", "port_index", "mode", "level_db", "pan", "input_source")
+
+LONG_OP_TIMEOUT_S = 120.0
 
 
 class LooperClient:
@@ -22,8 +24,8 @@ class LooperClient:
     async def reachable(self) -> bool:
         return await self.transport.reachable()
 
-    async def command(self, cmd: Any) -> dict:
-        reply = await self.transport.request(json.dumps(cmd))
+    async def command(self, cmd: Any, timeout: Optional[float] = None) -> dict:
+        reply = await self.transport.request(json.dumps(cmd), timeout=timeout)
         if "error" in reply:
             raise RpcError("internal", str(reply["error"]))
         return reply
@@ -57,10 +59,10 @@ class LooperClient:
     # ----- sessions ------------------------------------------------------
 
     async def load_session(self, project_path: str) -> dict:
-        return await self.command({"LoadSession": project_path})
+        return await self.command({"LoadSession": project_path}, timeout=LONG_OP_TIMEOUT_S)
 
     async def save_session_at(self, dir_path: str) -> dict:
-        return await self.command({"SaveSessionAt": dir_path})
+        return await self.command({"SaveSessionAt": dir_path}, timeout=LONG_OP_TIMEOUT_S)
 
     # ----- mix -----------------------------------------------------------
 

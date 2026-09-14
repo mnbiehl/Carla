@@ -139,6 +139,45 @@ def test_reply_id_mismatch_is_internal():
     assert err.type == "internal" and "id" in err.message
 
 
+def test_call_timeout_override_replaces_read_timeout_only(monkeypatch):
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def spying_wait_for(aw, timeout):
+        seen.setdefault("timeouts", []).append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    async def run():
+        server, port = await _serve(lambda r: {"id": r["id"], "ok": True, "result": None})
+        monkeypatch.setattr(asyncio, "wait_for", spying_wait_for)
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port, timeout=5.0))
+        await rpc.call("project_load", {"path": "/p"}, timeout=120.0)
+        server.close()
+
+    asyncio.run(run())
+    # connect uses the transport default (5.0); the read uses the override (120.0).
+    assert seen["timeouts"] == [5.0, 120.0]
+
+
+def test_call_without_timeout_override_uses_transport_default(monkeypatch):
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def spying_wait_for(aw, timeout):
+        seen.setdefault("timeouts", []).append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    async def run():
+        server, port = await _serve(lambda r: {"id": r["id"], "ok": True, "result": None})
+        monkeypatch.setattr(asyncio, "wait_for", spying_wait_for)
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port, timeout=5.0))
+        await rpc.call("ping")
+        server.close()
+
+    asyncio.run(run())
+    assert seen["timeouts"] == [5.0, 5.0]
+
+
 def test_non_object_reply_is_internal():
     async def run():
         server, port = await _serve(lambda r: "[1, 2]")

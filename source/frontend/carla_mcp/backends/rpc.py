@@ -29,8 +29,13 @@ class JsonLinesTransport:
         self.port = port
         self.timeout = timeout
 
-    async def request(self, payload: str) -> dict:
-        """Send one line, read one line, parse JSON. Raises RpcError only."""
+    async def request(self, payload: str, timeout: Optional[float] = None) -> dict:
+        """Send one line, read one line, parse JSON. Raises RpcError only.
+
+        `timeout`, when given, overrides the transport default for this
+        call's read only; the connect timeout stays `self.timeout`.
+        """
+        read_timeout = self.timeout if timeout is None else timeout
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port), self.timeout
@@ -41,7 +46,7 @@ class JsonLinesTransport:
         try:
             writer.write(payload.encode() + b"\n")
             await writer.drain()
-            line = await asyncio.wait_for(reader.readline(), self.timeout)
+            line = await asyncio.wait_for(reader.readline(), read_timeout)
         except (OSError, asyncio.TimeoutError) as exc:
             raise RpcError("backend_unavailable",
                            f"request to {self.host}:{self.port} failed: {exc}") from exc
@@ -75,10 +80,11 @@ class CarlaRpc:
         self.transport = transport
         self._ids = itertools.count(1)
 
-    async def call(self, method: str, params: Optional[dict] = None) -> Any:
+    async def call(self, method: str, params: Optional[dict] = None,
+                    timeout: Optional[float] = None) -> Any:
         req_id = next(self._ids)
         payload = json.dumps({"id": req_id, "method": method, "params": params or {}})
-        reply = await self.transport.request(payload)
+        reply = await self.transport.request(payload, timeout=timeout)
         if reply.get("id") != req_id:
             raise RpcError("internal", f"reply id {reply.get('id')} != request id {req_id}")
         if reply.get("ok"):

@@ -1,7 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock
 
-from carla_mcp.backends.carla import CarlaClient
+from carla_mcp.backends.carla import LONG_OP_TIMEOUT_S, CarlaClient
 from carla_mcp.worker.api import ALLOWLIST
 
 
@@ -25,6 +25,22 @@ def test_methods_send_name_and_params():
     rpc.call.reset_mock()
     asyncio.run(client.ping())
     rpc.call.assert_awaited_once_with("ping", {})
+
+
+def test_project_load_and_save_use_long_timeout():
+    client, rpc = _client()
+    asyncio.run(client.project_load(path="/p.carxp"))
+    rpc.call.assert_awaited_once_with("project_load", {"path": "/p.carxp"}, timeout=LONG_OP_TIMEOUT_S)
+    rpc.call.reset_mock()
+    asyncio.run(client.project_save(path="/p.carxp"))
+    rpc.call.assert_awaited_once_with("project_save", {"path": "/p.carxp"}, timeout=LONG_OP_TIMEOUT_S)
+
+
+def test_normal_call_does_not_pass_a_timeout():
+    client, rpc = _client()
+    asyncio.run(client.ping())
+    rpc.call.assert_awaited_once_with("ping", {})
+    assert "timeout" not in rpc.call.call_args.kwargs
 
 
 def test_handles_maps_handle_to_id():

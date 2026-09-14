@@ -10,12 +10,29 @@ from typing import Any, Dict, List, Optional
 
 from carla_mcp.backends.rpc import CarlaRpc
 
+LONG_OP_TIMEOUT_S = 120.0
+
+
 def _rpc(fn):
     """Mark an async method as an RPC method: its name is sent as the method,
     its keyword arguments as params."""
 
     async def wrapper(self, **params):
         return await self.rpc.call(fn.__name__, params)
+
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.is_rpc = True
+    return wrapper
+
+
+def _rpc_long(fn):
+    """Same as `_rpc`, but the call gets LONG_OP_TIMEOUT_S instead of the
+    transport default, for verbs whose backend work (project load/save) can
+    plausibly run past the default read timeout."""
+
+    async def wrapper(self, **params):
+        return await self.rpc.call(fn.__name__, params, timeout=LONG_OP_TIMEOUT_S)
 
     wrapper.__name__ = fn.__name__
     wrapper.__doc__ = fn.__doc__
@@ -80,9 +97,9 @@ class CarlaClient:
     async def patchbay_disconnect(self, *, connection_id: int) -> dict: ...
 
     # project
-    @_rpc
+    @_rpc_long
     async def project_save(self, *, path: str) -> dict: ...
-    @_rpc
+    @_rpc_long
     async def project_load(self, *, path: str) -> dict: ...
 
     # convenience (not an RPC method)
