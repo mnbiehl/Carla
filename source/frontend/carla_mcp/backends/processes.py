@@ -38,7 +38,12 @@ class ProcessManager:
             return self._units[spec.name].proc.pid
         log = open(self._log_path(spec.name), "a")
         try:
-            proc = subprocess.Popen(spec.argv, cwd=spec.cwd, env=spec.env, stdout=log, stderr=log)
+            # stdin=DEVNULL: the bridge's stdin is the MCP JSON-RPC pipe; a child
+            # that reads stdin (loopers prompts on it without JACK) would steal
+            # requests. start_new_session: children outlive the bridge and are
+            # not hit by a hangup or group signal aimed at the MCP client.
+            proc = subprocess.Popen(spec.argv, cwd=spec.cwd, env=spec.env, stdin=subprocess.DEVNULL,
+                                    stdout=log, stderr=log, start_new_session=True)
         except OSError:
             log.close()
             raise
@@ -91,6 +96,20 @@ def tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
 def a2j_running() -> bool:
     try:
         return subprocess.run(["pgrep", "-x", "a2jmidid"], capture_output=True, timeout=3).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+# A Carla GUI started from carla.py by any Python interpreter (matched against
+# the full command line by `pgrep -f`, POSIX extended regex).
+CARLA_GUI_PGREP_PATTERN = r"python[0-9.]* (.* )?([^ ]*/)?carla\.py( |$)"
+
+
+def carla_gui_running() -> bool:
+    """True when some process is running carla.py (with or without the RPC worker)."""
+    try:
+        return subprocess.run(["pgrep", "-f", CARLA_GUI_PGREP_PATTERN],
+                              capture_output=True, timeout=3).returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 

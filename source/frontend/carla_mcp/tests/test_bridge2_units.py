@@ -9,11 +9,20 @@ def _b():
     return Bridge.for_tests()
 
 
+def _sse_port(b):
+    return units._sse_host_port(b)[1]
+
+
 def test_start_carla_main_spawns_and_waits_for_rpc(monkeypatch):
     b = _b()
     monkeypatch.setattr(units, "POLL_S", 0.001)
-    reach = iter([False, False, True])
-    with patch("carla_mcp.bridge.units.tcp_reachable", side_effect=lambda *a, **k: next(reach)), \
+    rpc_reach = iter([False, False, True])
+
+    def reachable(host, port, **kw):
+        return next(rpc_reach) if port == b.config.carla_rpc_port else False
+
+    with patch("carla_mcp.bridge.units.tcp_reachable", side_effect=reachable), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
          patch.object(b.processes, "spawn", return_value=77) as spawn, \
          patch.object(b.processes, "is_running", return_value=True):
         assert asyncio.run(units.start_carla_main(b)) is None
@@ -35,10 +44,63 @@ def test_start_carla_main_reports_early_exit(monkeypatch):
     b = _b()
     monkeypatch.setattr(units, "POLL_S", 0.001)
     with patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
          patch.object(b.processes, "spawn", return_value=1), \
          patch.object(b.processes, "is_running", return_value=False):
         msg = asyncio.run(units.start_carla_main(b))
     assert msg and "exited" in msg
+
+
+def test_start_carla_main_refuses_second_instance_when_carla_py_running_without_worker():
+    b = _b()
+    with patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=True), \
+         patch.object(b.processes, "spawn") as spawn:
+        msg = asyncio.run(units.start_carla_main(b))
+    spawn.assert_not_called()
+    assert msg == (f"Carla is running without the RPC worker on {b.config.carla_rpc_port}; "
+                   "not starting a second instance (restart Carla from this branch)")
+
+
+def test_start_carla_main_refuses_second_instance_when_legacy_sse_port_answers():
+    b = Bridge.for_tests(env={"CARLA_MCP_PORT": "3"})  # distinct from the closed RPC port 1
+    probed = []
+
+    def reachable(host, port, **kw):
+        probed.append(port)
+        return port == _sse_port(b)
+
+    with patch("carla_mcp.bridge.units.tcp_reachable", side_effect=reachable), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
+         patch.object(b.processes, "spawn") as spawn:
+        msg = asyncio.run(units.start_carla_main(b))
+    spawn.assert_not_called()
+    assert msg is not None and "without the RPC worker" in msg
+    assert probed == [b.config.carla_rpc_port, _sse_port(b)]
+
+
+def test_start_carla_main_spawn_oserror_is_returned_not_raised():
+    b = _b()
+    with patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
+         patch.object(b.processes, "spawn", side_effect=FileNotFoundError("pw-jack")):
+        msg = asyncio.run(units.start_carla_main(b))
+    assert msg is not None and msg.startswith("carla:main spawn failed:") and "pw-jack" in msg
+
+
+def test_start_looper_engine_spawn_oserror_is_returned_not_raised():
+    b = _b()
+    with patch("carla_mcp.bridge.units.pw_link.list_outputs", return_value=[]), \
+         patch.object(b.processes, "spawn", side_effect=PermissionError("denied")):
+        msg = asyncio.run(units.start_looper_engine(b))
+    assert msg is not None and msg.startswith("looper:engine spawn failed:") and "denied" in msg
+
+
+def test_start_a2j_spawn_oserror_is_returned_not_raised():
+    b = _b()
+    with patch("carla_mcp.bridge.units.a2j_running", return_value=False), \
+         patch.object(b.processes, "spawn", side_effect=PermissionError("denied")):
+        assert units.start_a2j(b) == "a2j spawn failed: denied"
 
 
 def test_start_looper_engine_waits_for_ports(monkeypatch):
