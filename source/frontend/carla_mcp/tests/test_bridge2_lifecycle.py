@@ -121,3 +121,70 @@ def test_rig_reset_routing_dry_run_lists_links():
     with patch("carla_mcp.bridge.tools.lifecycle.do_routing_reset", new=AsyncMock(return_value="OK")) as reset:
         out = asyncio.run(_tools(b)["rig_reset_routing"].fn())
     assert out["result"] == {"dry_run": False, "report": "OK"} and reset.await_count == 1
+
+
+# ----- C1: rig_up(session=...) only loads onto a cold rig ---------------------
+
+def _starter_patches(calls):
+    def _a2j(b):
+        calls.append("a2j")
+        return None
+
+    async def _carla(b):
+        calls.append("carla")
+        return None
+
+    async def _looper(b):
+        calls.append("looper")
+        return None
+
+    return (patch("carla_mcp.bridge.tools.lifecycle.units.start_a2j", side_effect=_a2j),
+            patch("carla_mcp.bridge.tools.lifecycle.units.start_carla_main", new=AsyncMock(side_effect=_carla)),
+            patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(side_effect=_looper)))
+
+
+def _run_rig_up(b, up_kinds, **kwargs):
+    calls = []
+    a2j, carla, looper = _starter_patches(calls)
+    load = AsyncMock(return_value=["OK\n"])
+    probe = patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.unit_probe",
+                  side_effect=lambda self, unit: unit.kind in up_kinds, autospec=True)
+    with a2j, carla, looper, probe as unit_probe, \
+         patch("carla_mcp.bridge.tools.sessions.load_session_into", new=load), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
+        out = asyncio.run(_tools(b)["rig_up"].fn(**kwargs))
+    return out, calls, load, unit_probe
+
+
+def test_rig_up_with_session_refuses_when_carla_already_up():
+    out, calls, load, _ = _run_rig_up(_bridge(), {"carla-main"}, session="tues")
+    assert out["ok"] is False and out["error"]["type"] == "validation"
+    assert out["error"]["message"] == lifecycle.RIG_ALREADY_UP_MESSAGE
+    assert out["notes"] == ["up: carla:main"]
+    assert calls == [] and load.await_count == 0
+
+
+def test_rig_up_with_session_refuses_when_looper_already_up():
+    out, calls, load, _ = _run_rig_up(_bridge(), {"looper-engine"}, session="tues")
+    assert out["ok"] is False and out["error"]["type"] == "validation"
+    assert "session_load" in out["error"]["message"]
+    assert calls == [] and load.await_count == 0
+
+
+def test_rig_up_with_session_loads_on_cold_start():
+    b = _bridge()
+    out, calls, load, unit_probe = _run_rig_up(b, set(), session="tues")
+    assert out["ok"] is True, out
+    assert calls == ["looper", "a2j", "carla"]
+    load.assert_awaited_once_with(b, "tues")
+    assert "OK\n" in out["notes"]
+    # The guard probed the core units before anything was started.
+    assert sorted(c.args[1].name for c in unit_probe.call_args_list) == ["carla:main", "looper:engine"]
+
+
+def test_rig_up_without_session_stays_idempotent_when_rig_is_up():
+    out, calls, load, unit_probe = _run_rig_up(_bridge(), {"carla-main", "looper-engine"})
+    assert out["ok"] is True
+    assert calls == ["looper", "a2j", "carla"]  # starters adopt running units themselves
+    assert load.await_count == 0 and unit_probe.call_count == 0
+    assert _tools(_bridge())["rig_up"].annotations == {"idempotentHint": True}

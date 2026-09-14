@@ -11,7 +11,7 @@ from carla_mcp.bridge.ops import BridgeOps
 from carla_mcp.bridge.result import ToolError, ok, tool_boundary
 from carla_mcp.bridge.tools import ToolSpec, exclusive
 from carla_mcp.rig.converge import do_routing_reset, do_stop
-from carla_mcp.rig.graph import RigGraph
+from carla_mcp.rig.graph import RigGraph, RuntimeUnit
 from carla_mcp.rig.reconcile import UNIT_START_ORDER, in_rig_port_space
 from carla_mcp.rig.session import SessionError, read_session
 from carla_mcp.rig.state_view import DETAILS, build_state
@@ -39,6 +39,19 @@ async def _state(b: Bridge, graph: Optional[RigGraph], session: Optional[str],
                        focus=focus, detail=detail)
 
 
+# Units whose presence means a performance may be live (loops in memory,
+# routing in place). rig_up only loads a session onto a cold rig.
+SESSION_GUARD_UNITS = (("carla:main", "carla-main"), ("looper:engine", "looper-engine"))
+
+RIG_ALREADY_UP_MESSAGE = "rig is already up; use session_load (destructive) to replace the running session"
+
+
+def _session_guard_units_up(b: Bridge) -> List[str]:
+    ops = BridgeOps(b)
+    return [name for name, kind in SESSION_GUARD_UNITS
+            if ops.unit_probe(RuntimeUnit(name=name, kind=kind))]
+
+
 def build(b: Bridge) -> List[ToolSpec]:
     # Map unit kinds to (unit name, starter function). Starters are None for legacy/session units.
     _unit_starters = {
@@ -49,9 +62,16 @@ def build(b: Bridge) -> List[ToolSpec]:
 
     @tool_boundary
     async def rig_up(session: Optional[str] = None) -> dict:
-        """Start the rig's processes in order (looper-engine, a2j, carla-main).
-        With `session`, also load that saved rig session (clean-slate, converge, verify)."""
+        """Start the rig's processes in order (looper-engine, a2j, carla-main); safe to repeat.
+        With `session`, also load that saved rig session (clean-slate, converge, verify),
+        but only on a cold start: if Carla or the looper is already up it refuses, because
+        loading replaces the loops in memory. Use session_load for that."""
         async with exclusive(b):
+            if session is not None:
+                already_up = _session_guard_units_up(b)
+                if already_up:
+                    raise ToolError("validation", RIG_ALREADY_UP_MESSAGE,
+                                    notes=[f"up: {', '.join(already_up)}"])
             started: List[str] = []
             notes: List[str] = []
             # Start units in UNIT_START_ORDER, skipping those without a starter (legacy looper-mcp, session carla-child).
