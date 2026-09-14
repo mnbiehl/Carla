@@ -9,7 +9,7 @@ from carla_mcp.bridge import units
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.ops import BridgeOps
 from carla_mcp.bridge.result import ToolError, ok, tool_boundary
-from carla_mcp.bridge.tools import ToolSpec
+from carla_mcp.bridge.tools import ToolSpec, exclusive
 from carla_mcp.rig.converge import do_routing_reset, do_stop
 from carla_mcp.rig.graph import RigGraph
 from carla_mcp.rig.reconcile import UNIT_START_ORDER, in_rig_port_space
@@ -51,30 +51,32 @@ def build(b: Bridge) -> List[ToolSpec]:
     async def rig_up(session: Optional[str] = None) -> dict:
         """Start the rig's processes in order (looper-engine, a2j, carla-main).
         With `session`, also load that saved rig session (clean-slate, converge, verify)."""
-        started: List[str] = []
-        notes: List[str] = []
-        # Start units in UNIT_START_ORDER, skipping those without a starter (legacy looper-mcp, session carla-child).
-        for kind in sorted(_unit_starters.keys(), key=lambda k: UNIT_START_ORDER.get(k, 9)):
-            name, starter = _unit_starters[kind]
-            result = starter(b)
-            err = await result if hasattr(result, "__await__") else result
-            if err is None:
-                started.append(name)
-            else:
-                notes.append(err)
-        if session is not None:
-            from carla_mcp.bridge.tools.sessions import load_session_into
-            notes.extend(await load_session_into(b, session))
-        state = await _state(b, b.graph, b.session_name, None, "normal")
-        return ok({"started": started, "state": state}, notes=notes)
+        async with exclusive(b):
+            started: List[str] = []
+            notes: List[str] = []
+            # Start units in UNIT_START_ORDER, skipping those without a starter (legacy looper-mcp, session carla-child).
+            for kind in sorted(_unit_starters.keys(), key=lambda k: UNIT_START_ORDER.get(k, 9)):
+                name, starter = _unit_starters[kind]
+                result = starter(b)
+                err = await result if hasattr(result, "__await__") else result
+                if err is None:
+                    started.append(name)
+                else:
+                    notes.append(err)
+            if session is not None:
+                from carla_mcp.bridge.tools.sessions import load_session_into
+                notes.extend(await load_session_into(b, session))
+            state = await _state(b, b.graph, b.session_name, None, "normal")
+            return ok({"started": started, "state": state}, notes=notes)
 
     @tool_boundary
     async def rig_down() -> dict:
         """Stop every rig process in reverse start order. Unsaved loop audio is lost."""
-        report = await do_stop(b.graph, BridgeOps(b))
-        b.graph = None
-        b.session_name = None
-        return ok({"report": report})
+        async with exclusive(b):
+            report = await do_stop(b.graph, BridgeOps(b))
+            b.graph = None
+            b.session_name = None
+            return ok({"report": report})
 
     @tool_boundary
     async def rig_state(focus: Optional[str] = None, detail: str = "normal",
@@ -104,7 +106,8 @@ def build(b: Bridge) -> List[ToolSpec]:
             links = [{"src": l.src, "dst": l.dst} for l in observed.links
                      if in_rig_port_space(l.src, l.dst)]
             return ok({"dry_run": True, "would_disconnect": links})
-        return ok({"dry_run": False, "report": await do_routing_reset(BridgeOps(b))})
+        async with exclusive(b):
+            return ok({"dry_run": False, "report": await do_routing_reset(BridgeOps(b))})
 
     return [
         ToolSpec("rig_up", rig_up, {"idempotentHint": True}),

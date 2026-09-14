@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Optional, Protocol
 
@@ -30,6 +31,9 @@ class Bridge:
     graph: Optional[RigGraph] = None
     version: str = "dev"
     session_name: Optional[str] = None
+    # Serializes mutating tools (per instance, never module-level). Tools fail
+    # fast when it is held rather than queueing behind a long save.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     @classmethod
     def from_env(cls) -> "Bridge":

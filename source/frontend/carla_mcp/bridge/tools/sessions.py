@@ -8,7 +8,7 @@ from typing import List
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.ops import BridgeOps
 from carla_mcp.bridge.result import ToolError, ok, tool_boundary
-from carla_mcp.bridge.tools import ToolSpec
+from carla_mcp.bridge.tools import ToolSpec, exclusive
 from carla_mcp.rig.converge import do_load, do_save
 from carla_mcp.rig.session import SessionError, read_session
 
@@ -72,25 +72,27 @@ def build(b: Bridge) -> List[ToolSpec]:
         """Save the live rig (Carla state, chains, looper session with loop audio, routing)
         as a named rig session. The only durable state — loop audio is memory-only until saved."""
         sdir = session_path(b, name)
-        if sdir.is_dir() and not overwrite:
-            raise ToolError("validation", f"session {name!r} exists; pass overwrite=True")
-        report = await do_save(name, sdir, BridgeOps(b))
-        notes: List[str] = []
-        try:
-            b.graph = read_session(sdir).graph
-            b.session_name = name
-        except SessionError as exc:
-            notes.append(f"saved but could not re-read session: {exc}")
-        return ok({"report": report, "path": str(sdir)}, notes=notes)
+        async with exclusive(b):
+            if sdir.is_dir() and not overwrite:
+                raise ToolError("validation", f"session {name!r} exists; pass overwrite=True")
+            report = await do_save(name, sdir, BridgeOps(b))
+            notes: List[str] = []
+            try:
+                b.graph = read_session(sdir).graph
+                b.session_name = name
+            except SessionError as exc:
+                notes.append(f"saved but could not re-read session: {exc}")
+            return ok({"report": report, "path": str(sdir)}, notes=notes)
 
     @tool_boundary
     async def session_load(name: str) -> dict:
         """Load a saved rig session: start missing units, clean-slate rig routing,
         converge to the saved graph, verify. Replaces the loops currently in memory."""
         from carla_mcp.bridge.tools.lifecycle import _state
-        notes = await load_session_into(b, name)
-        state = await _state(b, b.graph, b.session_name, None, "normal")
-        return ok({"report": notes[0], "state": state})
+        async with exclusive(b):
+            notes = await load_session_into(b, name)
+            state = await _state(b, b.graph, b.session_name, None, "normal")
+            return ok({"report": notes[0], "state": state})
 
     @tool_boundary
     async def session_list() -> dict:

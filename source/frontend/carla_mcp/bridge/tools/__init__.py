@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List
+from typing import Any, AsyncIterator, Callable, Dict, List
 
 from mcp.types import ToolAnnotations
 
 from carla_mcp.bridge.app import Bridge
+from carla_mcp.bridge.result import ToolError
+
+BUSY_MESSAGE = "another rig operation is in progress; try again when it finishes"
+
+
+@asynccontextmanager
+async def exclusive(b: Bridge) -> AsyncIterator[None]:
+    """Hold the bridge's rig-operation lock; fail fast (validation) if another
+    mutating tool holds it. The check and the uncontended acquire run without
+    an intervening await, so they are atomic on the event loop."""
+    if b.lock.locked():
+        raise ToolError("validation", BUSY_MESSAGE)
+    async with b.lock:
+        yield
 
 
 @dataclass
