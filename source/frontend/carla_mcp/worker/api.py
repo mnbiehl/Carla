@@ -7,6 +7,7 @@ it refuses anything not in ALLOWLIST and validates parameters by name.
 from __future__ import annotations
 
 import inspect
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from carla_backend import BINARY_NATIVE
@@ -41,6 +42,7 @@ class WorkerApi:
         self.version_str = version
         self.client_name = client_name
         self._on_engine_stop = on_engine_stop
+        self._lock = threading.Lock()
 
     # ----- dispatch -----------------------------------------------------
 
@@ -53,13 +55,25 @@ class WorkerApi:
             bound = sig.bind(**(params or {}))
         except TypeError as exc:
             raise RpcError("validation", f"{method}: {exc}") from exc
-        return fn(*bound.args, **bound.kwargs)
+        with self._lock:
+            return fn(*bound.args, **bound.kwargs)
 
     # ----- helpers -------------------------------------------------------
 
+    def _int(self, name: str, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RpcError("validation", f"{name} must be an integer, got {value!r}")
+        return value
+
+    def _float(self, name: str, value: Any) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RpcError("validation", f"{name} must be a number, got {value!r}")
+        return float(value)
+
     def _check_pid(self, plugin_id: int) -> int:
+        plugin_id = self._int("plugin_id", plugin_id)
         count = self.host.get_current_plugin_count()
-        if not isinstance(plugin_id, int) or not 0 <= plugin_id < count:
+        if not 0 <= plugin_id < count:
             raise RpcError("not_found", f"no plugin with id {plugin_id} (count={count})")
         return plugin_id
 
@@ -155,8 +169,9 @@ class WorkerApi:
         }
 
     def _check_param(self, pid: int, param_id: int) -> int:
+        param_id = self._int("param_id", param_id)
         count = self.host.get_parameter_count(pid)
-        if not isinstance(param_id, int) or not 0 <= param_id < count:
+        if not 0 <= param_id < count:
             raise RpcError("not_found", f"plugin {pid} has no parameter {param_id} (count={count})")
         return param_id
 
@@ -171,8 +186,9 @@ class WorkerApi:
     def param_set(self, plugin_id: int, param_id: int, value: float) -> dict:
         pid = self._check_pid(plugin_id)
         prm = self._check_param(pid, param_id)
-        self.host.set_parameter_value(pid, prm, float(value))
-        return {"plugin_id": pid, "param_id": prm, "value": float(value)}
+        val = self._float("value", value)
+        self.host.set_parameter_value(pid, prm, val)
+        return {"plugin_id": pid, "param_id": prm, "value": val}
 
     # ----- custom data ---------------------------------------------------
 
@@ -197,11 +213,16 @@ class WorkerApi:
         return self.cache.snapshot()
 
     def patchbay_connect(self, group_out: int, port_out: int, group_in: int, port_in: int) -> dict:
+        group_out = self._int("group_out", group_out)
+        port_out = self._int("port_out", port_out)
+        group_in = self._int("group_in", group_in)
+        port_in = self._int("port_in", port_in)
         ok = self.host.patchbay_connect(False, group_out, port_out, group_in, port_in)
         self._require(bool(ok), f"patchbay_connect {group_out}:{port_out}->{group_in}:{port_in}")
         return {"connected": True}
 
     def patchbay_disconnect(self, connection_id: int) -> dict:
+        connection_id = self._int("connection_id", connection_id)
         self._require(bool(self.host.patchbay_disconnect(False, connection_id)),
                       f"patchbay_disconnect {connection_id}")
         return {"disconnected": connection_id}

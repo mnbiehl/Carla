@@ -1,3 +1,5 @@
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -142,3 +144,84 @@ def test_engine_stop_invokes_callback():
     api = _api(on_engine_stop=lambda: stopped.append(True))
     assert api.dispatch("engine_stop", {}) == {"stopping": True}
     assert stopped == [True]
+
+
+class _FakeHost:
+    """A real (non-mock) host whose plugin count is genuine mutable state,
+    so a race in add_plugin's before/after count reads is actually observable.
+
+    add_plugin sleeps ~5ms before incrementing the count, standing in for a
+    real (slow) Carla host call. get_current_plugin_count also has a small
+    (~1ms) delay before returning the attribute: a real call into the host
+    crosses ctypes, which releases the GIL for the call's duration just like
+    add_plugin's sleep does here, so without that delay CPython's GIL happens
+    to execute the increment-then-read pair inside add_plugin() atomically
+    enough that the race never reproduces in practice. The delay here
+    reinstates that realistic window so the race is actually observable.
+    """
+
+    def __init__(self):
+        self.count = 0
+
+    def add_plugin(self, *_args, **_kwargs):
+        time.sleep(0.005)
+        self.count += 1
+        return True
+
+    def get_current_plugin_count(self):
+        time.sleep(0.001)
+        return self.count
+
+    def get_last_error(self):
+        return ""
+
+
+def test_dispatch_serializes_concurrent_add_plugin():
+    host = _FakeHost()
+    api = _api(host)
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            result = api.dispatch("add_plugin", {"ptype": 4, "path": "/p", "label": "l"})
+            results.append(result["plugin_id"])
+        except Exception as exc:  # noqa: BLE001 - test needs to see any failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert set(results) == set(range(8))
+
+
+def test_non_int_plugin_id_is_validation():
+    api = _api()
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("plugin_info", {"plugin_id": "0"})
+    assert exc.value.type == "validation"
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("plugin_info", {"plugin_id": True})
+    assert exc.value.type == "validation"
+
+
+def test_param_set_non_numeric_value_is_validation():
+    host = _host()
+    api = _api(host)
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("param_set", {"plugin_id": 0, "param_id": 0, "value": "loud"})
+    assert exc.value.type == "validation"
+    host.set_parameter_value.assert_not_called()
+
+
+def test_patchbay_connect_non_int_is_validation():
+    host = _host()
+    api = _api(host)
+    with pytest.raises(RpcError) as exc:
+        api.dispatch("patchbay_connect", {"group_out": "1", "port_out": 2, "group_in": 3, "port_in": 4})
+    assert exc.value.type == "validation"
+    host.patchbay_connect.assert_not_called()
