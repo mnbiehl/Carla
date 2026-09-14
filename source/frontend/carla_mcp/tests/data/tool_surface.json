@@ -1,0 +1,6 @@
+{
+  "rig_up": {"params": ["session"], "annotations": {"idempotentHint": true}},
+  "rig_down": {"params": [], "annotations": {"destructiveHint": true}},
+  "rig_state": {"params": ["focus", "detail", "compare"], "annotations": {"readOnlyHint": true}},
+  "rig_reset_routing": {"params": ["dry_run"], "annotations": {"destructiveHint": true}}
+}
