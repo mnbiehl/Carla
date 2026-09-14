@@ -65,8 +65,10 @@ def test_unknown_action_is_ignored():
 def test_events_dispatch_to_registered_cache():
     cache = PatchbayCache()
     events.register(cache)
-    events.dispatch(ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED, 5, 0, 1, 0, 0.0, "X")
-    assert cache.snapshot()["groups"][0]["name"] == "X"
-    events.register(None)
-    events.dispatch(ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED, 6, 0, 1, 0, 0.0, "Y")  # no-op
+    try:
+        events.dispatch(ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED, 5, 0, 1, 0, 0.0, "X")
+        assert cache.snapshot()["groups"][0]["name"] == "X"
+    finally:
+        events.register(None)
+    events.dispatch(ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED, 6, 0, 1, 0, 0.0, "Y")  # no-op once unregistered
     assert len(cache.snapshot()["groups"]) == 1
