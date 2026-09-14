@@ -44,7 +44,21 @@ class Bridge:
                   env: Optional[dict] = None) -> "Bridge":
         import tempfile
         base = tmp_dir or tempfile.mkdtemp(prefix="carla-mcp-test-")
-        cfg = BridgeConfig.from_env(env or {"HOME": base, "XDG_STATE_HOME": base})
+        # Low ports on loopback refuse connections immediately (nothing an
+        # unprivileged process can bind there), so a test that forgets to
+        # mock a client method gets backend_unavailable instead of reaching
+        # the live rig on 8088/8089. Carla and looper get distinct closed
+        # ports so a test can still tell the two probes apart. Callers may
+        # still override via `env`.
+        test_env = {
+            "HOME": base,
+            "XDG_STATE_HOME": base,
+            "CARLA_RPC_PORT": "1",
+            "LOOPER_JSON_PORT": "2",
+            "CARLA_MCP_PORT": "1",
+        }
+        test_env.update(env or {})
+        cfg = BridgeConfig.from_env(test_env)
 
         async def _no_sse(url, name, args):
             return None
@@ -65,5 +79,5 @@ def _git_rev(cfg: BridgeConfig) -> str:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(cfg.frontend_dir),
                              capture_output=True, text=True, timeout=3)
         return out.stdout.strip() or "unknown"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return "unknown"
