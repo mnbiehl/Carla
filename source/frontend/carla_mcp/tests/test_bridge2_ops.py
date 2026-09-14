@@ -46,6 +46,18 @@ def test_observe_probes_units_links_and_looper_state():
     assert observed.looper_state["main_muted"] is True
 
 
+def test_observe_without_graph_probes_core_units():
+    b = _bridge()
+    ops = BridgeOps(b)
+    with patch("carla_mcp.bridge.ops.pw_link.list_links", return_value=[]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_outputs", return_value=["loopers:loop0_out_l"]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_inputs", return_value=[]), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.ops.a2j_running", return_value=True):
+        observed = asyncio.run(ops.observe(None))
+    assert observed.unit_status == {"looper:engine": True, "a2j": True, "carla:main": False}
+
+
 def test_carla_project_and_looper_payload_translate_errors_to_strings():
     b = _bridge()
     ops = BridgeOps(b)

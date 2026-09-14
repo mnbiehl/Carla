@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from carla_mcp.rig.describe import describe_rig
-from carla_mcp.rig.graph import RigGraph
+from carla_mcp.rig.graph import RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import ObservedState
 from carla_mcp.rig.reconcile import diff, in_rig_port_space
 
 DETAILS = ("normal", "diagram", "io")
+
+# (name, kind) of the runtime units every rig needs — what rig_up starts, in
+# start order. With no session loaded these are what rig_state observes and
+# what its verdict checks (without them the verdict would say OK for a dead rig).
+CORE_RUNTIME_UNITS: Tuple[Tuple[str, str], ...] = (
+    ("looper:engine", "looper-engine"),
+    ("a2j", "a2j"),
+    ("carla:main", "carla-main"),
+)
+
+
+def core_runtime_units() -> List[RuntimeUnit]:
+    return [RuntimeUnit(name=name, kind=kind) for name, kind in CORE_RUNTIME_UNITS]
 
 
 def _focus_match(focus: Optional[str], src: str, dst: str) -> bool:
@@ -39,7 +52,9 @@ def build_state(graph: Optional[RigGraph], observed: ObservedState, loopers: Lis
     notes: List[str] = []
     unexpected = set()
     if graph is None:
-        verdict = "OK (no session loaded)"
+        issues = [f"down unit: {name}" for name, _ in CORE_RUNTIME_UNITS
+                  if not observed.unit_status.get(name, False)]
+        verdict = "OK (no session loaded)" if not issues else f"DEGRADED: {len(issues)} issues"
         notes.append("no desired graph: links are reported as observed, not verified")
     else:
         d = diff(graph, observed)

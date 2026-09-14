@@ -1,8 +1,10 @@
+import json
+
 import pytest
 
 from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import Link, ObservedState
-from carla_mcp.rig.state_view import build_state
+from carla_mcp.rig.state_view import CORE_RUNTIME_UNITS, build_state, core_runtime_units
 
 LOOPS = [
     {"id": 7, "name": "uke", "port_index": 0, "mode": "Playing", "level_db": -3.0, "pan": 0.0, "input_source": None},
@@ -27,14 +29,40 @@ def _graph():
     return g
 
 
-def test_no_session_is_ok_with_note():
-    obs = _observed([("loopers:loop0_out_l", "Carla:audio-in3")], {})
+CORE_UP = {"looper:engine": True, "a2j": True, "carla:main": True}
+
+
+def test_no_session_is_ok_with_note_when_core_units_up():
+    obs = _observed([("loopers:loop0_out_l", "Carla:audio-in3")], dict(CORE_UP))
     st = build_state(None, obs, LOOPS, {"bridge": "abc"}, session=None)
-    assert st["verdict"] == "OK (no session loaded)"
+    assert st["verdict"] == "OK (no session loaded)" and st["issues"] == []
     assert st["session"] is None and st["versions"] == {"bridge": "abc"}
     assert st["loops"][0]["node"] == "loop:0" and st["loops"][1]["level_db"] == 0.0
     assert st["links"] == [{"src": "loopers:loop0_out_l", "dst": "Carla:audio-in3", "desired": None}]
-    assert st["units"] == {}
+    assert st["units"] == {"looper:engine": {"up": True}, "a2j": {"up": True}, "carla:main": {"up": True}}
+    json.dumps(st)  # stays JSON-serializable
+
+
+def test_no_session_with_down_core_units_is_degraded():
+    obs = _observed([], {"looper:engine": False, "a2j": True, "carla:main": False})
+    st = build_state(None, obs, LOOPS, {}, session=None)
+    assert st["verdict"] == "DEGRADED: 2 issues"
+    assert st["issues"] == ["down unit: looper:engine", "down unit: carla:main"]
+    assert st["units"] == {"looper:engine": {"up": False}, "a2j": {"up": True}, "carla:main": {"up": False}}
+    json.dumps(st)
+
+
+def test_no_session_unobserved_core_unit_counts_as_down():
+    obs = _observed([], {"looper:engine": True, "a2j": True})
+    st = build_state(None, obs, [], {}, session=None)
+    assert st["verdict"] == "DEGRADED: 1 issues" and st["issues"] == ["down unit: carla:main"]
+
+
+def test_core_runtime_units_match_constant_and_are_fresh_objects():
+    units = core_runtime_units()
+    assert [(u.name, u.kind) for u in units] == list(CORE_RUNTIME_UNITS)
+    assert isinstance(CORE_RUNTIME_UNITS, tuple)
+    assert core_runtime_units()[0] is not units[0]
 
 
 def test_with_graph_reports_verdict_units_and_desired_flags():

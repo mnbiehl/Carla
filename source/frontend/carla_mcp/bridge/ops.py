@@ -17,6 +17,7 @@ from carla_mcp.bridge.app import Bridge
 from carla_mcp.rig.converge import RigOps
 from carla_mcp.rig.graph import RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import ObservedState, observe as rig_observe
+from carla_mcp.rig.state_view import core_runtime_units
 
 # loopers' SaveSessionAt replies "ok" as soon as the command is enqueued, well
 # before the (potentially 100+ MB) audio and project.loopers file are written
@@ -78,7 +79,9 @@ class BridgeOps(RigOps):
         return False
 
     async def observe(self, graph: Optional[RigGraph]) -> ObservedState:
-        units = list(graph.runtime_units.values()) if graph is not None else []
+        # No desired graph: still probe the core units so rig_state can say
+        # which are down instead of reporting an empty (OK) unit table.
+        units = list(graph.runtime_units.values()) if graph is not None else core_runtime_units()
 
         async def _state():
             try:

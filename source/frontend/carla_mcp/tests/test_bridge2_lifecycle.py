@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.tools import lifecycle
 from carla_mcp.rig.graph import RigGraph, RuntimeUnit
@@ -34,14 +35,46 @@ def test_annotations_and_names():
     assert t["rig_state"].annotations == {"readOnlyHint": True}
 
 
+CORE_UP = {"looper:engine": True, "a2j": True, "carla:main": True}
+
+
 def test_rig_state_without_session():
     b = _bridge()
-    with patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
+    with patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe",
+               new=AsyncMock(return_value=_observed(dict(CORE_UP)))) as observe:
         out = asyncio.run(_tools(b)["rig_state"].fn())
     assert out["ok"] is True
     assert out["result"]["verdict"] == "OK (no session loaded)"
+    assert out["result"]["units"] == {name: {"up": True} for name in CORE_UP}
     assert out["result"]["versions"] == {"bridge": "test", "carla": "w1"}
     assert out["result"]["loops"][0]["name"] == "uke"
+    assert observe.await_args.args[0] is None
+
+
+def test_rig_state_without_session_reports_down_core_units():
+    b = _bridge()
+    b.carla.version = AsyncMock(side_effect=RpcError("backend_unavailable", "down"))
+    obs = _observed({"looper:engine": False, "a2j": True, "carla:main": False})
+    with patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=obs)):
+        out = asyncio.run(_tools(b)["rig_state"].fn())
+    assert out["ok"] is True
+    st = out["result"]
+    assert st["verdict"] == "DEGRADED: 2 issues"
+    assert st["issues"] == ["down unit: looper:engine", "down unit: carla:main"]
+    assert st["units"]["carla:main"] == {"up": False} and st["versions"]["carla"] == "down"
+
+
+def test_rig_state_without_session_probes_core_units_through_real_observe():
+    b = _bridge()
+    with patch("carla_mcp.bridge.ops.pw_link.list_links", return_value=[]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_outputs", return_value=[]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_inputs", return_value=[]), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.ops.a2j_running", return_value=False):
+        out = asyncio.run(_tools(b)["rig_state"].fn())
+    st = out["result"]
+    assert st["verdict"] == "DEGRADED: 3 issues"
+    assert st["units"] == {"looper:engine": {"up": False}, "a2j": {"up": False}, "carla:main": {"up": False}}
 
 
 def test_rig_state_compare_reads_named_session(tmp_path):
@@ -188,3 +221,18 @@ def test_rig_up_without_session_stays_idempotent_when_rig_is_up():
     assert calls == ["looper", "a2j", "carla"]  # starters adopt running units themselves
     assert load.await_count == 0 and unit_probe.call_count == 0
     assert _tools(_bridge())["rig_up"].annotations == {"idempotentHint": True}
+
+
+def test_rig_up_state_is_degraded_after_a_failed_start():
+    b = _bridge()
+    calls = []
+    a2j, carla, looper = _starter_patches(calls)
+    obs = _observed({"looper:engine": True, "a2j": True, "carla:main": False})
+    with a2j, looper, \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_carla_main",
+               new=AsyncMock(return_value="carla:main spawn failed: no pw-jack")), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=obs)):
+        out = asyncio.run(_tools(b)["rig_up"].fn())
+    assert out["ok"] is True and out["notes"] == ["carla:main spawn failed: no pw-jack"]
+    assert out["result"]["state"]["verdict"] == "DEGRADED: 1 issues"
+    assert out["result"]["state"]["issues"] == ["down unit: carla:main"]
