@@ -12,7 +12,7 @@ from carla_mcp.bridge.result import ToolError, ok, tool_boundary
 from carla_mcp.bridge.tools import ToolSpec
 from carla_mcp.rig.converge import do_routing_reset, do_stop
 from carla_mcp.rig.graph import RigGraph
-from carla_mcp.rig.reconcile import in_rig_port_space
+from carla_mcp.rig.reconcile import UNIT_START_ORDER, in_rig_port_space
 from carla_mcp.rig.session import SessionError, read_session
 from carla_mcp.rig.state_view import DETAILS, build_state
 
@@ -40,15 +40,22 @@ async def _state(b: Bridge, graph: Optional[RigGraph], session: Optional[str],
 
 
 def build(b: Bridge) -> List[ToolSpec]:
+    # Map unit kinds to (unit name, starter function). Starters are None for legacy/session units.
+    _unit_starters = {
+        "looper-engine": ("looper:engine", units.start_looper_engine),
+        "a2j": ("a2j", units.start_a2j),
+        "carla-main": ("carla:main", units.start_carla_main),
+    }
 
     @tool_boundary
     async def rig_up(session: Optional[str] = None) -> dict:
-        """Start the rig's processes (a2jmidid, Carla, loopers). With `session`,
-        also load that saved rig session (clean-slate, converge, verify)."""
+        """Start the rig's processes in order (looper-engine, a2j, carla-main).
+        With `session`, also load that saved rig session (clean-slate, converge, verify)."""
         started: List[str] = []
         notes: List[str] = []
-        for name, starter in (("a2j", units.start_a2j), ("carla:main", units.start_carla_main),
-                              ("looper:engine", units.start_looper_engine)):
+        # Start units in UNIT_START_ORDER, skipping those without a starter (legacy looper-mcp, session carla-child).
+        for kind in sorted(_unit_starters.keys(), key=lambda k: UNIT_START_ORDER.get(k, 9)):
+            name, starter = _unit_starters[kind]
             result = starter(b)
             err = await result if hasattr(result, "__await__") else result
             if err is None:

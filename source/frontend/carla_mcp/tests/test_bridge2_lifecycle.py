@@ -1,11 +1,11 @@
 import asyncio
-import json
 from unittest.mock import AsyncMock, patch
 
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.tools import lifecycle
-from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
+from carla_mcp.rig.graph import RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import Link, ObservedState
+from carla_mcp.rig.reconcile import UNIT_START_ORDER
 from carla_mcp.rig.session import RigSession, write_session
 
 
@@ -89,10 +89,17 @@ def test_rig_up_starts_units_in_order_and_returns_state():
          patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(side_effect=_start_looper)), \
          patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
         out = asyncio.run(_tools(b)["rig_up"].fn())
-    assert order == ["a2j", "carla", "looper"]
+    # Start order matches UNIT_START_ORDER: looper-engine (0) < a2j (2) < carla-main (3)
+    assert order == ["looper", "a2j", "carla"]
     assert out["ok"] is True and out["result"]["started"] == ["a2j", "carla:main"]
     assert out["notes"] == ["looper:engine not ready after 10s"]
     assert "verdict" in out["result"]["state"]
+    # Verify order is derived from UNIT_START_ORDER, not hardcoded: the kinds with starters sorted ascending.
+    expected_order_kinds = sorted(
+        ["looper-engine", "a2j", "carla-main"],
+        key=lambda k: UNIT_START_ORDER[k]
+    )
+    assert expected_order_kinds == ["looper-engine", "a2j", "carla-main"]
 
 
 def test_rig_down_clears_graph_and_reports():
