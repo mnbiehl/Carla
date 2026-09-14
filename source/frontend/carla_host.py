@@ -2863,8 +2863,16 @@ class HostWindow(QMainWindow):
         except ImportError as e:
             print(f"RPC worker unavailable: {e}", file=sys.stderr)
             return
-        port = int(os.getenv("CARLA_RPC_PORT", "8089"))
-        self.fRpcServer = attach(self.host, port=port, client_name=self.fClientName)
+        port_str = os.getenv("CARLA_RPC_PORT", "8089")
+        port = None
+        try:
+            port = int(port_str)
+            self.fRpcServer = attach(self.host, port=port, client_name=self.fClientName)
+        except (OSError, ValueError) as e:
+            print(f"RPC worker failed to start on port {port if port is not None else port_str}: {e}",
+                  file=sys.stderr)
+            self.fRpcServer = None
+            return
         print(f"RPC worker listening on 127.0.0.1:{self.fRpcServer.port}", file=sys.stderr)
 
     def slot_stopRpcWorker(self):

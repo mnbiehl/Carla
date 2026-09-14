@@ -23,7 +23,11 @@ def attach(host: Any, port: int, client_name: str = "Carla", version: str = "dev
                     on_engine_stop=on_engine_stop)
     server = RpcServer(api, port=port)
     events.register(cache)
-    server.start()
+    try:
+        server.start()
+    except OSError:
+        events.register(None)
+        raise
     return server
 
 

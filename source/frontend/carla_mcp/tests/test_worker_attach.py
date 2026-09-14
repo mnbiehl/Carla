@@ -2,6 +2,8 @@ import json
 import socket
 from unittest.mock import MagicMock
 
+import pytest
+
 from carla_mcp.worker import attach, detach, events
 from carla_mcp.worker import __main__ as worker_main
 
@@ -21,6 +23,29 @@ def test_attach_starts_server_and_registers_cache():
     finally:
         detach(srv)
     assert events._cache is None
+
+
+def test_attach_port_in_use_raises_and_unregisters_events():
+    # Plain listening socket, no SO_REUSEADDR/SO_REUSEPORT, to occupy a port that a
+    # second bind() must fail against.
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        occupied_port = blocker.getsockname()[1]
+
+        host = MagicMock()
+        with pytest.raises(OSError):
+            attach(host, port=occupied_port, client_name="Carla", version="t")
+
+        # The engine-callback hook must not be left registered to an orphan cache.
+        assert events._cache is None
+        # events.py exposes only register()/dispatch() beyond the module state itself;
+        # dispatching with nothing registered must be a safe no-op, not reach a stale cache.
+        events.dispatch(1, 0, 0, 0, 0, 0.0, "")
+        assert events._cache is None
+    finally:
+        blocker.close()
 
 
 def test_headless_run_serves_until_engine_stop(monkeypatch):
@@ -51,4 +76,21 @@ def test_headless_run_fails_when_engine_init_fails(monkeypatch):
     host.engine_init.return_value = False
     host.get_last_error.return_value = "no jack"
     monkeypatch.setattr(worker_main, "build_host", lambda bin_dir: host)
+
+    captured = {}
+    real_attach = worker_main.attach
+
+    def spy_attach(*args, **kwargs):
+        srv = real_attach(*args, **kwargs)
+        captured["server"] = srv
+        return srv
+
+    monkeypatch.setattr(worker_main, "attach", spy_attach)
+
     assert worker_main.run(["--client-name", "x", "--port", "0"]) == 2
+
+    # Teardown must have actually run on the init-failure path: detach() unregisters the
+    # events cache and stops the RPC server, even though the engine itself never started.
+    assert events._cache is None
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", captured["server"].port), timeout=2)
