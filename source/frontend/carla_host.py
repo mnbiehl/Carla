@@ -281,7 +281,7 @@ class HostWindow(QMainWindow):
         import sys
         print("🔍 DEBUG: Attempting to import MCP server module...", file=sys.stderr)
         try:
-            from carla_mcp import start_mcp_server, stop_mcp_server, is_mcp_server_running
+            from carla_mcp.main import start_mcp_server, stop_mcp_server, is_mcp_server_running
             self.fMcpServerEnabled = True
             print("✅ MCP server module imported successfully", file=sys.stderr)
         except ImportError as e:
@@ -2816,7 +2816,7 @@ class HostWindow(QMainWindow):
             return
         
         try:
-            from carla_mcp import start_mcp_server
+            from carla_mcp.main import start_mcp_server
             success = start_mcp_server(self.host, gui_instance=self)
             if success:
                 self.fMcpServer = True
@@ -2835,7 +2835,7 @@ class HostWindow(QMainWindow):
             return
         
         try:
-            from carla_mcp import stop_mcp_server
+            from carla_mcp.main import stop_mcp_server
             stop_mcp_server()
             self.fMcpServer = None
             import sys
