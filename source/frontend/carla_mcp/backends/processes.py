@@ -34,6 +34,8 @@ class ProcessManager:
         return self.log_dir / f"{name}.log"
 
     def spawn(self, spec: UnitSpec) -> int:
+        if self.is_running(spec.name):
+            return self._units[spec.name].proc.pid
         log = open(self._log_path(spec.name), "a")
         try:
             proc = subprocess.Popen(spec.argv, cwd=spec.cwd, env=spec.env, stdout=log, stderr=log)

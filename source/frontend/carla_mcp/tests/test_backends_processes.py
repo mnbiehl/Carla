@@ -27,6 +27,29 @@ def test_spawn_opens_append_log_and_records_pid(tmp_path):
     assert pm.names() == ["carla:main"]
 
 
+def test_spawn_is_a_noop_when_already_running(tmp_path):
+    pm = ProcessManager(tmp_path / "logs")
+    with patch("carla_mcp.backends.processes.subprocess.Popen", return_value=_proc(4242)) as popen:
+        first_pid = pm.spawn(UnitSpec(name="carla:main", argv=["pw-jack", "python3", "carla.py"]))
+        log_before = pm._units["carla:main"].log
+        second_pid = pm.spawn(UnitSpec(name="carla:main", argv=["pw-jack", "python3", "carla.py"]))
+    assert popen.call_count == 1
+    assert first_pid == second_pid == 4242
+    assert pm._units["carla:main"].log is log_before
+
+
+def test_spawn_respawns_after_process_exited(tmp_path):
+    pm = ProcessManager(tmp_path / "logs")
+    with patch("carla_mcp.backends.processes.subprocess.Popen",
+               side_effect=[_proc(1, alive=False), _proc(2)]) as popen:
+        first_pid = pm.spawn(UnitSpec(name="x", argv=["true"]))
+        assert not pm.is_running("x")
+        second_pid = pm.spawn(UnitSpec(name="x", argv=["true"]))
+    assert popen.call_count == 2
+    assert first_pid == 1 and second_pid == 2
+    assert pm.is_running("x") and pm.pid("x") == 2
+
+
 def test_exited_process_is_forgotten(tmp_path):
     pm = ProcessManager(tmp_path)
     with patch("carla_mcp.backends.processes.subprocess.Popen", return_value=_proc(alive=False)):
