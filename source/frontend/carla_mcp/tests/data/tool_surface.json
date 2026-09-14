@@ -1,9 +1,11 @@
 {
-  "rig_up": {"params": ["session"], "annotations": {"idempotentHint": true}},
+  "rig_up": {"params": [{"name": "session", "default": null}], "annotations": {"idempotentHint": true}},
   "rig_down": {"params": [], "annotations": {"destructiveHint": true}},
-  "rig_state": {"params": ["focus", "detail", "compare"], "annotations": {"readOnlyHint": true}},
-  "rig_reset_routing": {"params": ["dry_run"], "annotations": {"destructiveHint": true}},
-  "session_save": {"params": ["name", "overwrite"], "annotations": {}},
-  "session_load": {"params": ["name"], "annotations": {"destructiveHint": true}},
+  "rig_state": {"params": [{"name": "focus", "default": null}, {"name": "detail", "default": "normal"},
+                           {"name": "compare", "default": null}], "annotations": {"readOnlyHint": true}},
+  "rig_reset_routing": {"params": [{"name": "dry_run", "default": false}], "annotations": {"destructiveHint": true}},
+  "session_save": {"params": [{"name": "name", "required": true}, {"name": "overwrite", "default": false}],
+                   "annotations": {}},
+  "session_load": {"params": [{"name": "name", "required": true}], "annotations": {"destructiveHint": true}},
   "session_list": {"params": [], "annotations": {"readOnlyHint": true}}
 }
