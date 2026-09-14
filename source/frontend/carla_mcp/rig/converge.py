@@ -257,6 +257,25 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
 # a rewire never changes processes and never blocks waiting for ports.
 REWIRE_OPS = ("disconnect", "connect")
 
+PORT_LISTING_UNAVAILABLE_NOTE = (
+    "port listing unavailable (pw-link -o/-i returned nothing); refusing to disconnect"
+)
+
+
+def _safe_disconnects(planned: List[Action], output_ports: set, input_ports: set) -> List[Action]:
+    """Drop any planned disconnect whose endpoints are not both confirmed live.
+
+    A disconnect is only trustworthy when its src is a known-live output port
+    and its dst is a known-live input port. If `pw-link -o`/`-i` fail or time
+    out (utils/pw_link.py returns [] on either), every live rig-space link
+    would otherwise look "unexpected" and this would tear down a healthy rig
+    mid-performance — even though `pw-link -l` (a separate subprocess) still
+    reported real links. Connects are unaffected: they are only ever planned
+    for port pairs already confirmed live by expand_edges.
+    """
+    return [a for a in planned
+           if a.op != "disconnect" or (a.src in output_ports and a.dst in input_ports)]
+
 
 def _link_text(action: Action) -> str:
     return f"{action.src} -> {action.dst}"
@@ -300,13 +319,30 @@ async def do_rewire(graph: RigGraph, ops: RigOps, dry_run: bool = False) -> Rewi
     as do_load's verify-and-retry step. Never starts or stops units, never
     waits for ports, never loads Carla or looper payload. With *dry_run* the
     plan is returned and nothing is applied.
+
+    Never disconnects a link unless both its endpoints are in the observed
+    output/input port lists; if those lists come back empty while links are
+    still reported, every disconnect is refused and the report notes why
+    (see PORT_LISTING_UNAVAILABLE_NOTE).
     """
-    d = diff(graph, await ops.observe(graph))
+    observed = await ops.observe(graph)
+    d = diff(graph, observed)
     planned = [a for a in plan(d, graph) if a.op in REWIRE_OPS]
+
+    output_ports = set(observed.output_ports)
+    input_ports = set(observed.input_ports)
+    refusal: List[str] = []
+    if observed.links and (not output_ports or not input_ports):
+        # pw-link -l returned links but -o/-i did not: an inconsistent
+        # snapshot, not a rig with nothing stray. Refuse every disconnect
+        # rather than treating every live link as unexpected.
+        refusal.append(PORT_LISTING_UNAVAILABLE_NOTE)
+    planned = _safe_disconnects(planned, output_ports, input_ports)
+
     if dry_run:
-        return Rewire(planned=planned, diff=d)
+        return Rewire(planned=planned, diff=d, failures=list(refusal))
     applied: List[Action] = []
-    failures: List[str] = []
+    failures: List[str] = list(refusal)
     for action in planned:
         errors: List[str] = []
         await _apply_action(action, graph, ops, errors)

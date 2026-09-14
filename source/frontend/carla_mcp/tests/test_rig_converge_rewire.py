@@ -35,15 +35,17 @@ def _graph():
 class RewireFakeOps(RigOps):
     """Links-only world. Every non-link side effect fails the test if reached."""
 
-    def __init__(self, links, fail_connect=()):
+    def __init__(self, links, fail_connect=(), output_ports=None, input_ports=None):
         self.links = set(links)
         self.fail_connect = set(fail_connect)
+        self.output_ports = list(OUTPUTS if output_ports is None else output_ports)
+        self.input_ports = list(INPUTS if input_ports is None else input_ports)
         self.calls = []
 
     async def observe(self, graph):
         units = list(graph.runtime_units.values()) if graph else []
         return ObservedState(links=[Link(s, d) for s, d in sorted(self.links)],
-                             output_ports=list(OUTPUTS), input_ports=list(INPUTS),
+                             output_ports=list(self.output_ports), input_ports=list(self.input_ports),
                              unit_status={u.name: False for u in units})
 
     def connect(self, src, dst):
@@ -117,3 +119,46 @@ def test_down_units_and_absent_nodes_are_reported_never_started_or_waited_for():
     rw = asyncio.run(do_rewire(g, ops))   # _forbidden raises on start_unit / wait_ports
     assert rw.diff.issues() == ["absent node: loop:2", "down unit: a2j"]
     assert rw.diff.verdict == "DEGRADED: 2 issues" and rw.failures == []
+
+
+# ----- P1: never disconnect a link the port lists can't confirm ---------------
+
+
+def test_empty_port_lists_refuse_all_disconnects_and_report_degraded():
+    """pw-link -l still returns links, but -o/-i came back empty (a failed or
+    timed-out probe). Every rig-space link would otherwise look unexpected;
+    do_rewire must refuse to disconnect any of them and say why."""
+    ops = RewireFakeOps({DESIRED_PRESENT, STRAY, DESKTOP}, output_ports=[], input_ports=[])
+    rw = asyncio.run(do_rewire(_graph(), ops))
+    assert [c for c in ops.calls if c[0] == "disconnect"] == []
+    assert ("disconnect", *STRAY) not in ops.calls
+    assert rw.applied == []
+    assert rw.diff.verdict.startswith("DEGRADED")
+    assert any("port listing unavailable" in note for note in rw.failures)
+    assert "refusing to disconnect" in rw.report()
+    assert "[Failures]" in rw.report()
+
+
+def test_link_missing_from_port_lists_is_spared_while_a_visible_stray_is_still_cut():
+    """One stray link's endpoints are both confirmed live (cut); another stray
+    link references a port the lists don't confirm (spared, not disconnected)."""
+    g = RigGraph()
+    g.add_node(Node(name="loop:0", kind="loop", port_index=0))
+    g.add_node(Node(name="strat", kind="track", jack_client="CarlaChain_strat"))
+    g.add_edge("loop:0", "strat")
+    desired_l = ("loopers:loop0_out_l", "CarlaChain_strat:audio-in1")
+    desired_r = ("loopers:loop0_out_r", "CarlaChain_strat:audio-in2")
+    visible_stray = ("loopers:loop1_out_l", "CarlaChain_strat:audio-in3")
+    ghost_stray = ("loopers:loop2_out_l", "CarlaChain_strat:audio-in4")  # src not live
+    ops = RewireFakeOps(
+        {desired_l, desired_r, visible_stray, ghost_stray},
+        output_ports=["loopers:loop0_out_l", "loopers:loop0_out_r", "loopers:loop1_out_l"],
+        input_ports=["CarlaChain_strat:audio-in1", "CarlaChain_strat:audio-in2",
+                     "CarlaChain_strat:audio-in3", "CarlaChain_strat:audio-in4"],
+    )
+    rw = asyncio.run(do_rewire(g, ops))
+    assert ("disconnect", *visible_stray) in ops.calls
+    assert ("disconnect", *ghost_stray) not in ops.calls
+    assert visible_stray not in ops.links
+    assert ghost_stray in ops.links
+    assert rw.failures == []  # a partial gap isn't the "lists unavailable" case
