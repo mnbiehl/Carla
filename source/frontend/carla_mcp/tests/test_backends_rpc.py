@@ -76,3 +76,77 @@ def test_reachable_probe():
         down = await JsonLinesTransport("127.0.0.1", 1).reachable()
         return up, down
     assert asyncio.run(run()) == (True, False)
+
+
+def test_connect_timeout_is_backend_unavailable(monkeypatch):
+    async def never_connects(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(asyncio, "open_connection", never_connects)
+
+    async def run():
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", 9, timeout=0.05))
+        with pytest.raises(RpcError) as exc:
+            await rpc.call("ping")
+        return exc.value
+
+    assert asyncio.run(run()).type == "backend_unavailable"
+
+
+def test_read_timeout_is_backend_unavailable():
+    async def run():
+        async def on_conn(reader, writer):
+            await reader.readline()
+            await asyncio.sleep(1)  # never reply
+        server = await asyncio.start_server(on_conn, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port, timeout=0.05))
+        with pytest.raises(RpcError) as exc:
+            await rpc.call("ping")
+        server.close()
+        return exc.value
+
+    assert asyncio.run(run()).type == "backend_unavailable"
+
+
+def test_empty_reply_is_internal():
+    async def run():
+        async def on_conn(reader, writer):
+            await reader.readline()
+            writer.close()  # hang up without replying
+        server = await asyncio.start_server(on_conn, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port))
+        with pytest.raises(RpcError) as exc:
+            await rpc.call("ping")
+        server.close()
+        return exc.value
+
+    err = asyncio.run(run())
+    assert err.type == "internal" and "empty" in err.message
+
+
+def test_reply_id_mismatch_is_internal():
+    async def run():
+        server, port = await _serve(lambda r: {"id": r["id"] + 1, "ok": True, "result": None})
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port))
+        with pytest.raises(RpcError) as exc:
+            await rpc.call("ping")
+        server.close()
+        return exc.value
+
+    err = asyncio.run(run())
+    assert err.type == "internal" and "id" in err.message
+
+
+def test_non_object_reply_is_internal():
+    async def run():
+        server, port = await _serve(lambda r: "[1, 2]")
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port))
+        with pytest.raises(RpcError) as exc:
+            await rpc.call("ping")
+        server.close()
+        return exc.value
+
+    err = asyncio.run(run())
+    assert err.type == "internal" and "not an object" in err.message
