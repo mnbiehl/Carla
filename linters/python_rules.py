@@ -43,15 +43,16 @@ def _final_name(node: ast.expr) -> Optional[str]:
 
 
 def _is_broad(node: ast.expr) -> bool:
-    return _final_name(node) in _BROAD_NAMES
+    if _final_name(node) in _BROAD_NAMES:
+        return True
+    # Recurse into nested tuples (e.g., except ((ValueError, Exception), TypeError):)
+    if isinstance(node, ast.Tuple):
+        return any(_is_broad(elt) for elt in node.elts)
+    return False
 
 
 def _handler_is_broad(handler_type: ast.expr) -> bool:
-    if _is_broad(handler_type):
-        return True
-    if isinstance(handler_type, ast.Tuple):
-        return any(_is_broad(elt) for elt in handler_type.elts)
-    return False
+    return _is_broad(handler_type)
 
 
 def _is_pytest_skip_attr(node: ast.expr) -> bool:
@@ -66,41 +67,46 @@ def _is_pytest_skip_attr(node: ast.expr) -> bool:
 
 
 def check_text(path: str, text: str) -> List[str]:
-    findings: List[str] = []
+    # Collect (lineno, message) pairs to avoid parsing line numbers from strings.
+    findings_with_lineno: List[tuple[int, str]] = []
     try:
         tree = ast.parse(text, filename=path)
     except SyntaxError as exc:
         line = exc.lineno or 1
-        findings.append(f"{path}:{line}: syntax-error: {exc.msg} — fix: make the file valid Python")
-        return findings
+        return [f"{path}:{line}: syntax-error: {exc.msg} — fix: make the file valid Python"]
 
     allow_broad = _is_allowlisted(path)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ExceptHandler):
             if node.type is None:
-                findings.append(
+                findings_with_lineno.append((
+                    node.lineno,
                     f"{path}:{node.lineno}: no-bare-except: bare `except:` swallows everything "
-                    "— fix: catch a specific exception or raise ToolError/RpcError")
+                    "— fix: catch a specific exception or raise ToolError/RpcError"))
             elif not allow_broad and _handler_is_broad(node.type):
-                findings.append(
+                findings_with_lineno.append((
+                    node.lineno,
                     f"{path}:{node.lineno}: no-broad-except: `except Exception` outside the RPC/tool "
-                    "boundary — fix: let RpcError propagate to tool_boundary, or catch the specific type")
+                    "boundary — fix: let RpcError propagate to tool_boundary, or catch the specific type"))
         elif isinstance(node, ast.Call) and _is_pytest_skip_attr(node.func):
             if not any(kw.arg == "reason" for kw in node.keywords):
-                findings.append(
+                findings_with_lineno.append((
+                    node.lineno,
                     f"{path}:{node.lineno}: skip-needs-reason: skip without reason= "
-                    "— fix: pytest.mark.skip(reason='...') so the skip self-documents")
+                    "— fix: pytest.mark.skip(reason='...') so the skip self-documents"))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for dec in node.decorator_list:
                 # A bare `@pytest.mark.skip` (no call) can never carry reason=.
                 if _is_pytest_skip_attr(dec):
-                    findings.append(
+                    findings_with_lineno.append((
+                        dec.lineno,
                         f"{path}:{dec.lineno}: skip-needs-reason: skip without reason= "
-                        "— fix: pytest.mark.skip(reason='...') so the skip self-documents")
+                        "— fix: pytest.mark.skip(reason='...') so the skip self-documents"))
 
-    findings.sort(key=lambda f: int(f.split(":", 2)[1]))
-    return findings
+    # Sort by line number, then return formatted strings.
+    findings_with_lineno.sort(key=lambda x: x[0])
+    return [msg for _, msg in findings_with_lineno]
 
 
 def _files(args: List[str]) -> List[Path]:
