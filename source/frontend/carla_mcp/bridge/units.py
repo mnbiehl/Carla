@@ -46,7 +46,7 @@ def _sse_host_port(b: Bridge) -> Tuple[str, int]:
     return parts.hostname or "127.0.0.1", parts.port or 80
 
 
-def _carla_running_without_worker(b: Bridge) -> bool:
+def carla_running_without_worker(b: Bridge) -> bool:
     """Carla is up but its RPC port is closed: a carla.py process exists, or the
     legacy MCP SSE port answers. Only meaningful once the RPC probe failed."""
     return carla_gui_running() or tcp_reachable(*_sse_host_port(b))
@@ -56,7 +56,7 @@ async def start_carla_main(b: Bridge) -> Optional[str]:
     port = b.config.carla_rpc_port
     if tcp_reachable("127.0.0.1", port):
         return None
-    if _carla_running_without_worker(b):
+    if carla_running_without_worker(b):
         return (f"Carla is running without the RPC worker on {port}; not starting a second "
                 "instance (restart Carla from this branch)")
     env = dict(os.environ)

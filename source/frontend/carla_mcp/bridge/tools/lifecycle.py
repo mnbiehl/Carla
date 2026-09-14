@@ -48,8 +48,15 @@ RIG_ALREADY_UP_MESSAGE = "rig is already up; use session_load (destructive) to r
 
 def _session_guard_units_up(b: Bridge) -> List[str]:
     ops = BridgeOps(b)
-    return [name for name, kind in SESSION_GUARD_UNITS
-            if ops.unit_probe(RuntimeUnit(name=name, kind=kind))]
+    up: List[str] = []
+    for name, kind in SESSION_GUARD_UNITS:
+        if ops.unit_probe(RuntimeUnit(name=name, kind=kind)):
+            up.append(name)
+        elif kind == "carla-main" and units.carla_running_without_worker(b):
+            # RPC is closed, but a Carla without the worker still holds rig-space
+            # links a session load would clear (start_carla_main refuses on this too).
+            up.append(f"{name} (running without the RPC worker)")
+    return up
 
 
 NO_SESSION_TO_RESET_MESSAGE = "no session loaded; nothing to reset routing to (use session_load)"

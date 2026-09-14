@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
 from carla_mcp.bridge.tools import lifecycle
@@ -342,13 +344,17 @@ def _starter_patches(calls):
             patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(side_effect=_looper)))
 
 
-def _run_rig_up(b, up_kinds, **kwargs):
+def _run_rig_up(b, up_kinds, carla_without_worker=None, **kwargs):
+    """`carla_without_worker`: None, or "pgrep"/"sse" for which probe of
+    units.carla_running_without_worker reports a Carla lacking the RPC worker."""
     calls = []
     a2j, carla, looper = _starter_patches(calls)
     load = AsyncMock(return_value=["OK\n"])
     probe = patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.unit_probe",
                   side_effect=lambda self, unit: unit.kind in up_kinds, autospec=True)
     with a2j, carla, looper, probe as unit_probe, \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=carla_without_worker == "pgrep"), \
+         patch("carla_mcp.bridge.units.tcp_reachable", return_value=carla_without_worker == "sse"), \
          patch("carla_mcp.bridge.tools.sessions.load_session_into", new=load), \
          patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
         out = asyncio.run(_tools(b)["rig_up"].fn(**kwargs))
@@ -367,6 +373,17 @@ def test_rig_up_with_session_refuses_when_looper_already_up():
     out, calls, load, _ = _run_rig_up(_bridge(), {"looper-engine"}, session="tues")
     assert out["ok"] is False and out["error"]["type"] == "validation"
     assert "session_load" in out["error"]["message"]
+    assert calls == [] and load.await_count == 0
+
+
+@pytest.mark.parametrize("via", ["pgrep", "sse"])
+def test_rig_up_with_session_refuses_when_carla_runs_without_the_rpc_worker(via):
+    # RPC 8089 and the looper probe both say down, but a Carla GUI without the
+    # worker is running: a session load would clear its rig-space links.
+    out, calls, load, _ = _run_rig_up(_bridge(), set(), carla_without_worker=via, session="tues")
+    assert out["ok"] is False
+    assert out["error"] == {"type": "validation", "message": lifecycle.RIG_ALREADY_UP_MESSAGE}
+    assert out["notes"] == ["up: carla:main (running without the RPC worker)"]
     assert calls == [] and load.await_count == 0
 
 
