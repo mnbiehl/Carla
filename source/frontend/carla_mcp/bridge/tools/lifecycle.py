@@ -86,8 +86,10 @@ def build(b: Bridge) -> List[ToolSpec]:
             raise ToolError("validation", f"detail must be one of {DETAILS}")
         graph, session = b.graph, b.session_name
         if compare is not None:
+            from carla_mcp.bridge.tools.sessions import session_path
+            sdir = session_path(b, compare)
             try:
-                graph = read_session(b.config.session_dir / compare).graph
+                graph = read_session(sdir).graph
             except SessionError as exc:
                 raise ToolError("not_found", f"session {compare!r}: {exc}") from exc
             session = compare
