@@ -35,7 +35,9 @@ def _read_looper_save_time_ms(project_path: Path) -> Optional[int]:
     partial write, or a save_time we can't trust)."""
     try:
         raw = project_path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError: a write cut mid multi-byte character (e.g. a
+        # non-ASCII looper name) — not ready yet, keep polling.
         return None
     try:
         data = json.loads(raw)

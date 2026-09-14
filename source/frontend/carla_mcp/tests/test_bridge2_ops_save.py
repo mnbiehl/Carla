@@ -109,3 +109,37 @@ def test_send_rpc_error_returns_immediately_without_polling(tmp_path):
     result = asyncio.run(run())
     assert result is not None
     assert "not connected" in result
+
+
+def test_invalid_utf8_mid_write_is_not_ready_then_valid_json_is_accepted(tmp_path):
+    session_dir = tmp_path / "looper"
+    session_dir.mkdir()
+    project = session_dir / "project.loopers"
+    # A write cut in the middle of a multi-byte UTF-8 character ("é" = c3 a9).
+    project.write_bytes(b'{"loopers": [{"name": "caf\xc3')
+
+    async def run():
+        async def finish_write():
+            await asyncio.sleep(0.05)
+            _write_project(project, int(time.time() * 1000))
+
+        task = asyncio.ensure_future(finish_write())
+        try:
+            result = await ops.looper_save_session_at(str(session_dir))
+        finally:
+            await task
+        return result
+
+    ops = _ops(tmp_path)
+    assert asyncio.run(run()) is None
+
+
+def test_invalid_utf8_that_never_completes_times_out_instead_of_raising(tmp_path):
+    from carla_mcp.bridge.ops import _read_looper_save_time_ms
+    session_dir = tmp_path / "looper"
+    session_dir.mkdir()
+    project = session_dir / "project.loopers"
+    project.write_bytes(b'{"save_time": 1, "name": "\xff\xfe"}')
+    assert _read_looper_save_time_ms(project) is None
+    result = asyncio.run(_ops(tmp_path, poll_s=0.01, wait_s=0.05).looper_save_session_at(str(session_dir)))
+    assert result is not None and "did not complete" in result
