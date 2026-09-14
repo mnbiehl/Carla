@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 from urllib.parse import urlsplit
 
 from carla_mcp.backends import pw_link
@@ -16,6 +16,17 @@ from carla_mcp.bridge.app import Bridge
 CARLA_READY_TIMEOUT_S = 20.0
 LOOPER_READY_TIMEOUT_S = 10.0
 POLL_S = 0.5
+
+NOT_STARTED_BY_THIS_BRIDGE = "not started by this bridge; left running"
+
+
+def _stop_owned(b: Bridge, name: str, still_up: Callable[[], bool]) -> Optional[str]:
+    """Stop `name` only if this bridge's ProcessManager spawned it. A unit that is
+    up but not ours (e.g. adopted after a bridge restart) is left running and
+    reported; a unit that is already down is success. No re-adoption by pid."""
+    if b.processes.stop(name):
+        return None
+    return NOT_STARTED_BY_THIS_BRIDGE if still_up() else None
 
 
 async def _wait(predicate, timeout_s: float, still_alive) -> Optional[str]:
@@ -66,7 +77,7 @@ async def start_carla_main(b: Bridge) -> Optional[str]:
 
 
 async def stop_carla_main(b: Bridge) -> Optional[str]:
-    return b.processes.stop("carla:main")
+    return _stop_owned(b, "carla:main", lambda: tcp_reachable("127.0.0.1", b.config.carla_rpc_port))
 
 
 async def start_looper_engine(b: Bridge) -> Optional[str]:
@@ -87,7 +98,7 @@ async def start_looper_engine(b: Bridge) -> Optional[str]:
 
 
 async def stop_looper_engine(b: Bridge) -> Optional[str]:
-    return b.processes.stop("looper:engine")
+    return _stop_owned(b, "looper:engine", lambda: ports_present("loopers:", pw_link.list_outputs))
 
 
 def start_a2j(b: Bridge) -> Optional[str]:
@@ -103,4 +114,4 @@ def start_a2j(b: Bridge) -> Optional[str]:
 
 
 def stop_a2j(b: Bridge) -> Optional[str]:
-    return b.processes.stop("a2j")
+    return _stop_owned(b, "a2j", a2j_running)

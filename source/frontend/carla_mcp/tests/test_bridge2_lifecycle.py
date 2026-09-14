@@ -144,6 +144,55 @@ def test_rig_down_clears_graph_and_reports():
     stop.assert_awaited_once()
 
 
+def test_rig_down_keeps_graph_when_stop_is_degraded():
+    b = _bridge()
+    g = RigGraph(); b.graph = g; b.session_name = "x"
+    report = "DEGRADED: 2 issues\n\nIssues:\n  - stop carla:main: not started by this bridge; left running"
+    with patch("carla_mcp.bridge.tools.lifecycle.do_stop", new=AsyncMock(return_value=report)):
+        out = asyncio.run(_tools(b)["rig_down"].fn())
+    assert out["ok"] is True and out["result"]["report"] == report
+    assert b.graph is g and b.session_name == "x"
+
+
+def test_rig_down_after_bridge_restart_reports_adopted_units_and_keeps_graph():
+    """Real do_stop + BridgeOps: nothing was spawned by this bridge, the rig is up."""
+    b = _bridge()
+    g = RigGraph()
+    g.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
+    g.add_runtime_unit(RuntimeUnit(name="looper:engine", kind="looper-engine"))
+    b.graph = g; b.session_name = "tues"
+    b.looper.get_state = AsyncMock(return_value={"loopers": []})
+    with patch("carla_mcp.bridge.units.tcp_reachable", return_value=True), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True), \
+         patch("carla_mcp.backends.pw_link.list_outputs", return_value=["loopers:loop0_out_l"]), \
+         patch("carla_mcp.backends.pw_link.list_inputs", return_value=[]), \
+         patch("carla_mcp.backends.pw_link.list_links", return_value=[]), \
+         patch.object(b.processes, "stop", wraps=b.processes.stop) as stop:
+        out = asyncio.run(_tools(b)["rig_down"].fn())
+    report = out["result"]["report"]
+    assert report.startswith("DEGRADED")
+    assert "[Stopped]" not in report  # adopted units are issues, never listed as stopped
+    assert "stop carla:main: not started by this bridge; left running" in report
+    assert "stop looper:engine: not started by this bridge; left running" in report
+    assert stop.call_count == 2
+    assert b.graph is g and b.session_name == "tues"
+
+
+def test_rig_down_with_units_already_down_is_ok_and_clears_graph():
+    b = _bridge()
+    g = RigGraph()
+    g.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
+    b.graph = g; b.session_name = "tues"
+    with patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False), \
+         patch("carla_mcp.backends.pw_link.list_outputs", return_value=[]), \
+         patch("carla_mcp.backends.pw_link.list_inputs", return_value=[]), \
+         patch("carla_mcp.backends.pw_link.list_links", return_value=[]):
+        out = asyncio.run(_tools(b)["rig_down"].fn())
+    assert out["result"]["report"].startswith("OK"), out
+    assert b.graph is None and b.session_name is None
+
+
 def test_rig_reset_routing_dry_run_lists_links():
     b = _bridge()
     obs = _observed(links=[("loopers:loop0_out_l", "Carla:audio-in3"), ("alsa:a", "alsa:b")])

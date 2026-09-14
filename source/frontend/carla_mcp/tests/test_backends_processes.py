@@ -60,7 +60,7 @@ def test_exited_process_is_forgotten(tmp_path):
     pm = ProcessManager(tmp_path)
     with patch("carla_mcp.backends.processes.subprocess.Popen", return_value=_proc(alive=False)):
         pm.spawn(UnitSpec(name="x", argv=["true"]))
-    assert not pm.is_running("x") and pm.pid("x") is None and pm.stop("x") is None
+    assert not pm.is_running("x") and pm.pid("x") is None and pm.stop("x") is False
 
 
 def test_stop_terminates_then_kills(tmp_path):
@@ -69,7 +69,7 @@ def test_stop_terminates_then_kills(tmp_path):
     proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), 0]
     with patch("carla_mcp.backends.processes.subprocess.Popen", return_value=proc):
         pm.spawn(UnitSpec(name="x", argv=["sleep"]))
-    assert pm.stop("x", timeout=0.01) is None
+    assert pm.stop("x", timeout=0.01) is True
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
     assert not pm.is_running("x")
@@ -123,3 +123,7 @@ def test_carla_gui_running_uses_pgrep_full_command_line():
 def test_carla_gui_pattern_matches_interpreter_running_carla_py(cmdline, expected):
     import re
     assert bool(re.search(CARLA_GUI_PGREP_PATTERN, cmdline)) is expected
+
+
+def test_stop_unknown_name_returns_false(tmp_path):
+    assert ProcessManager(tmp_path).stop("carla:main") is False

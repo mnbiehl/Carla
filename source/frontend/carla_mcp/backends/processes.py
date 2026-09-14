@@ -70,10 +70,13 @@ class ProcessManager:
     def names(self) -> List[str]:
         return [n for n in list(self._units) if self._live(n) is not None]
 
-    def stop(self, name: str, timeout: float = 5.0) -> Optional[str]:
+    def stop(self, name: str, timeout: float = 5.0) -> bool:
+        """Stop a unit this manager spawned. True if it stopped one; False when
+        no live process of that name was spawned here (never started, already
+        exited, or started by someone else — callers decide what that means)."""
         unit = self._live(name)
         if unit is None:
-            return None
+            return False
         unit.proc.terminate()
         try:
             unit.proc.wait(timeout=timeout)
@@ -82,7 +85,7 @@ class ProcessManager:
             unit.proc.wait()
         unit.log.close()
         del self._units[name]
-        return None
+        return True
 
 
 def tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:

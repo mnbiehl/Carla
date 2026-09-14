@@ -115,13 +115,47 @@ def test_start_looper_engine_waits_for_ports(monkeypatch):
                                             "--remote-json-port", str(b.config.looper_port)]
 
 
-def test_stop_functions_delegate_to_process_manager():
+def _stop_all(b):
+    return [asyncio.run(units.stop_carla_main(b)), asyncio.run(units.stop_looper_engine(b)),
+            units.stop_a2j(b)]
+
+
+def _probes(up):
+    return (patch("carla_mcp.bridge.units.tcp_reachable", return_value=up),
+            patch("carla_mcp.bridge.units.pw_link.list_outputs",
+                  return_value=["loopers:loop0_out_l"] if up else []),
+            patch("carla_mcp.bridge.units.a2j_running", return_value=up))
+
+
+def test_stop_functions_stop_units_spawned_by_this_bridge():
     b = _b()
-    with patch.object(b.processes, "stop", return_value=None) as stop:
-        assert asyncio.run(units.stop_carla_main(b)) is None
-        assert asyncio.run(units.stop_looper_engine(b)) is None
-        assert units.stop_a2j(b) is None
+    tcp, outs, a2j = _probes(up=True)  # would still look up; ours, so stopping is success
+    with tcp, outs, a2j, patch.object(b.processes, "stop", return_value=True) as stop:
+        assert _stop_all(b) == [None, None, None]
     assert [c.args[0] for c in stop.call_args_list] == ["carla:main", "looper:engine", "a2j"]
+
+
+def test_stop_functions_leave_adopted_running_units_alone():
+    b = _b()
+    tcp, outs, a2j = _probes(up=True)
+    with tcp, outs, a2j, patch.object(b.processes, "stop", return_value=False):
+        assert _stop_all(b) == [units.NOT_STARTED_BY_THIS_BRIDGE] * 3
+    assert units.NOT_STARTED_BY_THIS_BRIDGE == "not started by this bridge; left running"
+
+
+def test_stop_functions_treat_already_down_units_as_success():
+    b = _b()
+    tcp, outs, a2j = _probes(up=False)
+    with tcp, outs, a2j, patch.object(b.processes, "stop", return_value=False):
+        assert _stop_all(b) == [None, None, None]
+
+
+def test_stop_carla_main_probes_the_rpc_port_of_this_config():
+    b = _b()
+    with patch("carla_mcp.bridge.units.tcp_reachable", return_value=True) as tcp, \
+         patch.object(b.processes, "stop", return_value=False):
+        asyncio.run(units.stop_carla_main(b))
+    tcp.assert_called_once_with("127.0.0.1", b.config.carla_rpc_port)
 
 
 def test_start_a2j_missing_binary():

@@ -91,11 +91,16 @@ def build(b: Bridge) -> List[ToolSpec]:
 
     @tool_boundary
     async def rig_down() -> dict:
-        """Stop every rig process in reverse start order. Unsaved loop audio is lost."""
+        """Stop every rig process in reverse start order. Unsaved loop audio is lost.
+        Units this bridge did not start (e.g. after a bridge restart) are left running
+        and reported as issues."""
         async with exclusive(b):
             report = await do_stop(b.graph, BridgeOps(b))
-            b.graph = None
-            b.session_name = None
+            # Forget the desired graph only when the rig is really down; a
+            # DEGRADED stop leaves units running that the graph still describes.
+            if report.startswith("OK"):
+                b.graph = None
+                b.session_name = None
             return ok({"report": report})
 
     @tool_boundary
