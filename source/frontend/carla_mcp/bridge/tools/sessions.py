@@ -51,6 +51,19 @@ def session_path(b: Bridge, name: str) -> Path:
     return sdir
 
 
+def _failed_save_notes(report: str, sdir: Path, created_dir: bool) -> List[str]:
+    """Notes for a FAILED save. If this call created `sdir` and it is still empty,
+    remove it so it does not block a re-save. Only a plain rmdir of an empty
+    directory this call created — never recursive, never a pre-existing one."""
+    notes: List[str] = [report] if "\n" in report.strip() else []
+    if created_dir and sdir.is_dir() and not any(sdir.iterdir()):
+        try:
+            sdir.rmdir()
+        except OSError as exc:
+            notes.append(f"could not remove empty session directory {sdir}: {exc}")
+    return notes
+
+
 async def load_session_into(b: Bridge, name: str) -> List[str]:
     """do_load into the bridge; returns notes. Sets b.graph / b.session_name."""
     sdir = session_path(b, name)
@@ -75,7 +88,11 @@ def build(b: Bridge) -> List[ToolSpec]:
         async with exclusive(b):
             if sdir.is_dir() and not overwrite:
                 raise ToolError("validation", f"session {name!r} exists; pass overwrite=True")
+            created_dir = not sdir.exists()
             report = await do_save(name, sdir, BridgeOps(b))
+            if report.startswith("FAILED"):
+                raise ToolError("degraded", report.splitlines()[0],
+                                notes=_failed_save_notes(report, sdir, created_dir))
             notes: List[str] = []
             try:
                 b.graph = read_session(sdir).graph

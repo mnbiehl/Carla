@@ -134,3 +134,94 @@ def test_session_path_accepts_a_valid_name():
     b = _bridge()
     d = _seed(b, "tues-jam")
     assert sessions.session_path(b, "tues-jam") == d
+
+
+# ----- FAILED saves are errors and leave no empty directory behind -----------
+
+NOTHING = "FAILED: nothing to save (carla and looper both unreachable)"
+
+
+def test_failed_save_on_fresh_dir_is_degraded_error_and_removes_the_dir():
+    b = _bridge()
+    sdir = b.config.session_dir / "tues"
+
+    async def failing_save(name, d, ops):
+        d.mkdir(parents=True, exist_ok=True)  # what do_save does before giving up
+        return NOTHING
+
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
+        out = asyncio.run(_tools(b)["session_save"].fn("tues"))
+    assert out["ok"] is False and out["error"] == {"type": "degraded", "message": NOTHING}
+    assert not sdir.exists()
+    assert b.graph is None and b.session_name is None
+    # The name is free again: a re-save is not refused as "exists".
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
+        again = asyncio.run(_tools(b)["session_save"].fn("tues"))
+    assert again["error"]["type"] == "degraded"
+
+
+def test_failed_save_through_real_do_save_with_backends_down_removes_the_dir():
+    b = _bridge()  # for_tests ports refuse immediately: carla and looper unreachable
+    out = asyncio.run(_tools(b)["session_save"].fn("tues"))
+    assert out["ok"] is False and out["error"] == {"type": "degraded", "message": NOTHING}
+    assert not (b.config.session_dir / "tues").exists()
+
+
+def test_failed_overwrite_leaves_existing_dir_untouched():
+    b = _bridge()
+    sdir = _seed(b, "tues")
+    before = _snapshot(sdir)
+
+    async def failing_save(name, d, ops):
+        return NOTHING
+
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
+        out = asyncio.run(_tools(b)["session_save"].fn("tues", overwrite=True))
+    assert out["ok"] is False and out["error"]["type"] == "degraded"
+    assert sdir.is_dir() and _snapshot(sdir) == before
+    assert b.graph is None and b.session_name is None
+
+
+def test_failed_overwrite_of_existing_empty_dir_is_not_removed():
+    b = _bridge()
+    sdir = b.config.session_dir / "tues"
+    sdir.mkdir(parents=True)
+
+    async def failing_save(name, d, ops):
+        return NOTHING
+
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
+        out = asyncio.run(_tools(b)["session_save"].fn("tues", overwrite=True))
+    assert out["error"]["type"] == "degraded" and sdir.is_dir()
+
+
+def test_failed_save_that_wrote_files_keeps_them_and_reports_the_full_report():
+    b = _bridge()
+    sdir = b.config.session_dir / "tues"
+    report = "FAILED: saved session does not re-read: bad json\n[Notes]\n  carla not reachable"
+
+    async def failing_save(name, d, ops):
+        d.mkdir(parents=True)
+        (d / "rig_session.json").write_text("{")
+        return report
+
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
+        out = asyncio.run(_tools(b)["session_save"].fn("tues"))
+    assert out["error"] == {"type": "degraded", "message": "FAILED: saved session does not re-read: bad json"}
+    assert out["notes"] == [report]
+    assert (sdir / "rig_session.json").exists()
+
+
+def test_degraded_save_is_ok_with_report():
+    b = _bridge()
+    report = "DEGRADED: 1 issues\n[Notes]\n  carla not reachable; no Carla state saved"
+
+    async def degraded_save(name, d, ops):
+        d.mkdir(parents=True, exist_ok=True)
+        write_session(RigSession(name=name, graph=RigGraph(), looper_session_dir="looper"), d)
+        return report
+
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=degraded_save):
+        out = asyncio.run(_tools(b)["session_save"].fn("tues"))
+    assert out["ok"] is True and out["result"]["report"] == report
+    assert b.session_name == "tues" and b.graph is not None
