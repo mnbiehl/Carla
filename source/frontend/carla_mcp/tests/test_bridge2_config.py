@@ -37,9 +37,13 @@ def test_env_overrides(tmp_path):
 
 
 def test_package_init_has_no_eager_imports():
-    import importlib, sys
-    for name in list(sys.modules):
-        if name.startswith("carla_mcp.main"):
-            del sys.modules[name]
-    importlib.import_module("carla_mcp")
-    assert "carla_mcp.main" not in sys.modules
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    frontend = Path(__file__).resolve().parents[2]
+    code = "import sys, carla_mcp; assert 'carla_mcp.main' not in sys.modules, sorted(m for m in sys.modules if m.startswith('carla_mcp'))"
+    env = dict(os.environ, PYTHONPATH=str(frontend))
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
