@@ -189,3 +189,35 @@ def test_non_object_reply_is_internal():
 
     err = asyncio.run(run())
     assert err.type == "internal" and "not an object" in err.message
+
+
+def test_reply_line_over_asyncio_default_64k_limit_is_read():
+    blob = "x" * (100 * 1024)  # well past StreamReader's 64 KiB default
+
+    async def run():
+        server, port = await _serve(lambda r: {"id": r["id"], "ok": True, "result": {"blob": blob}})
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port))
+        try:
+            return await rpc.call("param_list", {"plugin_id": 0})
+        finally:
+            server.close()
+
+    assert asyncio.run(run()) == {"blob": blob}
+
+
+def test_reply_line_over_read_limit_is_internal_rpc_error(monkeypatch):
+    from carla_mcp.backends import rpc as rpc_module
+    monkeypatch.setattr(rpc_module, "RPC_READ_LIMIT_BYTES", 1024)
+
+    async def run():
+        server, port = await _serve(lambda r: {"id": r["id"], "ok": True, "result": "y" * 8192})
+        rpc = CarlaRpc(JsonLinesTransport("127.0.0.1", port))
+        try:
+            with pytest.raises(RpcError) as exc:
+                await rpc.call("patchbay_list")
+        finally:
+            server.close()
+        return exc.value
+
+    err = asyncio.run(run())
+    assert err.type == "internal" and err.message == "reply exceeds 1024 bytes"

@@ -13,6 +13,10 @@ import itertools
 import json
 from typing import Any, Optional
 
+# asyncio's default StreamReader limit is 64 KiB; phase-2 replies (param_list on
+# large LV2 plugins, patchbay_list) exceed it. One reply line may be this long.
+RPC_READ_LIMIT_BYTES = 16 * 1024 * 1024
+
 
 class RpcError(Exception):
     """A typed backend failure. type ∈ not_found|validation|backend_unavailable|internal."""
@@ -38,7 +42,8 @@ class JsonLinesTransport:
         read_timeout = self.timeout if timeout is None else timeout
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port), self.timeout
+                asyncio.open_connection(self.host, self.port, limit=RPC_READ_LIMIT_BYTES),
+                self.timeout,
             )
         except (OSError, asyncio.TimeoutError) as exc:
             raise RpcError("backend_unavailable",
@@ -50,6 +55,9 @@ class JsonLinesTransport:
         except (OSError, asyncio.TimeoutError) as exc:
             raise RpcError("backend_unavailable",
                            f"request to {self.host}:{self.port} failed: {exc}") from exc
+        except (ValueError, asyncio.LimitOverrunError) as exc:
+            # StreamReader.readline raises ValueError when one line overruns the limit.
+            raise RpcError("internal", f"reply exceeds {RPC_READ_LIMIT_BYTES} bytes") from exc
         finally:
             writer.close()
         if not line:
