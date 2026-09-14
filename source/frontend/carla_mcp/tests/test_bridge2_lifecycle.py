@@ -344,9 +344,11 @@ def _starter_patches(calls):
             patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(side_effect=_looper)))
 
 
-def _run_rig_up(b, up_kinds, carla_without_worker=None, **kwargs):
+def _run_rig_up(b, up_kinds, carla_without_worker=None, looper_tcp_reachable=False, **kwargs):
     """`carla_without_worker`: None, or "pgrep"/"sse" for which probe of
-    units.carla_running_without_worker reports a Carla lacking the RPC worker."""
+    units.carla_running_without_worker reports a Carla lacking the RPC worker.
+    `looper_tcp_reachable`: the looper's own TCP-port probe (lifecycle.tcp_reachable),
+    independent of the pw-link-based unit_probe."""
     calls = []
     a2j, carla, looper = _starter_patches(calls)
     load = AsyncMock(return_value=["OK\n"])
@@ -355,6 +357,7 @@ def _run_rig_up(b, up_kinds, carla_without_worker=None, **kwargs):
     with a2j, carla, looper, probe as unit_probe, \
          patch("carla_mcp.bridge.units.carla_gui_running", return_value=carla_without_worker == "pgrep"), \
          patch("carla_mcp.bridge.units.tcp_reachable", return_value=carla_without_worker == "sse"), \
+         patch("carla_mcp.bridge.tools.lifecycle.tcp_reachable", return_value=looper_tcp_reachable), \
          patch("carla_mcp.bridge.tools.sessions.load_session_into", new=load), \
          patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
         out = asyncio.run(_tools(b)["rig_up"].fn(**kwargs))
@@ -384,6 +387,17 @@ def test_rig_up_with_session_refuses_when_carla_runs_without_the_rpc_worker(via)
     assert out["ok"] is False
     assert out["error"] == {"type": "validation", "message": lifecycle.RIG_ALREADY_UP_MESSAGE}
     assert out["notes"] == ["up: carla:main (running without the RPC worker)"]
+    assert calls == [] and load.await_count == 0
+
+
+def test_rig_up_with_session_refuses_when_looper_tcp_reachable_despite_empty_pwlink_ports():
+    # The pw-link-based unit_probe reads the looper as down (as it would if
+    # `pw-link -o` failed or timed out), but the looper's own TCP port still
+    # answers: rig_up(session=) must still refuse rather than load over it.
+    out, calls, load, _ = _run_rig_up(_bridge(), set(), looper_tcp_reachable=True, session="tues")
+    assert out["ok"] is False and out["error"]["type"] == "validation"
+    assert out["error"]["message"] == lifecycle.RIG_ALREADY_UP_MESSAGE
+    assert any(note.startswith("up: looper:engine") for note in out["notes"])
     assert calls == [] and load.await_count == 0
 
 

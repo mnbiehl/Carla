@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from carla_mcp.backends.processes import tcp_reachable
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge import units
 from carla_mcp.bridge.app import Bridge
@@ -56,6 +57,11 @@ def _session_guard_units_up(b: Bridge) -> List[str]:
             # RPC is closed, but a Carla without the worker still holds rig-space
             # links a session load would clear (start_carla_main refuses on this too).
             up.append(f"{name} (running without the RPC worker)")
+        elif kind == "looper-engine" and tcp_reachable("127.0.0.1", b.config.looper_port):
+            # The looper-engine probe above is pw-link-based (ports_present); if
+            # pw-link fails or times out it reads as down even with loops still
+            # in memory. The looper's own TCP port is an independent check.
+            up.append(f"{name} (TCP port reachable; pw-link ports not seen)")
     return up
 
 
