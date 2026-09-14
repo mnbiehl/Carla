@@ -67,3 +67,49 @@ def test_detail_diagram_and_io():
 def test_non_rig_links_are_dropped():
     obs = _observed([("alsa_input:capture_AUX0", "alsa_output:playback_AUX0")], {})
     assert build_state(None, obs, [], {}, session=None)["links"] == []
+
+
+def test_unexpected_rig_link_is_a_note_not_degraded():
+    # Desired graph (loop:0 -> strat) is fully satisfied, units are up, and
+    # there is one extra hand-made link inside rig port space (e.g. a manual
+    # patch in the Carla GUI). Spec: "Hand edits are notes, absorbed on
+    # save" — this must not push the verdict to DEGRADED.
+    obs = _observed(
+        [
+            ("loopers:loop0_out_l", "CarlaChain_strat:audio-in1"),
+            ("Carla:audio-out1", "Carla:audio-in3"),
+        ],
+        {"carla:main": True, "looper:engine": True},
+    )
+    st = build_state(_graph(), obs, LOOPS, {}, session="tuesday")
+    assert st["verdict"] == "OK"
+    assert not any("unexpected connection" in i for i in st["issues"])
+    assert any(
+        "Carla:audio-out1" in n and "Carla:audio-in3" in n and "hand edit" in n
+        for n in st["notes"]
+    )
+    # Still reported as observed, just not part of the desired graph.
+    unexpected_link = next(l for l in st["links"] if l["src"] == "Carla:audio-out1")
+    assert unexpected_link["desired"] is False
+
+
+def test_missing_edge_still_degrades():
+    # Only deviation is a missing desired edge (no hand edits, units up) —
+    # this must still be DEGRADED.
+    obs = _observed([], {"carla:main": True, "looper:engine": True})
+    st = build_state(_graph(), obs, LOOPS, {}, session="tuesday")
+    assert st["verdict"].startswith("DEGRADED")
+    assert any(i.startswith("missing edge:") for i in st["issues"])
+
+
+def test_focus_plain_string_filters_loops_and_links():
+    # The non-"loop:N" focus branch: substring match on links, name equality
+    # on loops.
+    links = [
+        ("loopers:loop3_out_l", "CarlaChain_vox:audio-in1"),
+        ("loopers:loop0_out_l", "Carla:audio-in3"),
+    ]
+    obs = _observed(links, {})
+    st = build_state(None, obs, LOOPS, {}, session=None, focus="vox")
+    assert [l["name"] for l in st["loops"]] == ["vox"]
+    assert [l["dst"] for l in st["links"]] == ["CarlaChain_vox:audio-in1"]

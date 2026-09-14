@@ -43,9 +43,19 @@ def build_state(graph: Optional[RigGraph], observed: ObservedState, loopers: Lis
         notes.append("no desired graph: links are reported as observed, not verified")
     else:
         d = diff(graph, observed)
-        issues = list(d.issues())
         unexpected = {(l.src, l.dst) for l in d.unexpected_connections}
-        verdict = d.verdict
+        # Hand-made rig-space links are notes, not DEGRADED (spec: "Hand
+        # edits are notes, absorbed on save"). Only RigDiff.issues()'s
+        # unexpected-connection lines are reclassified here; every other
+        # category (missing edges, absent nodes, down units, dead port
+        # references, unresolved effects) stays an issue.
+        issues = [i for i in d.issues() if not i.startswith("unexpected connection: ")]
+        notes.extend(
+            f"hand edit: unexpected connection {l.src} -> {l.dst} "
+            "(absorbed on next session_save)"
+            for l in d.unexpected_connections
+        )
+        verdict = "OK" if not issues else f"DEGRADED: {len(issues)} issues"
 
     units: Dict[str, dict] = {name: {"up": bool(up)} for name, up in observed.unit_status.items()}
 
