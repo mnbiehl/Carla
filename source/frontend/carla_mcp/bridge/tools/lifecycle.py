@@ -111,7 +111,18 @@ def build(b: Bridge) -> List[ToolSpec]:
                     notes.append(err)
             if session is not None:
                 from carla_mcp.bridge.tools.sessions import load_session_into
-                notes.extend(await load_session_into(b, session))
+                try:
+                    notes.extend(await load_session_into(b, session))
+                except ToolError as exc:
+                    # Units are already up even though the load FAILed: tell
+                    # the caller what it now needs to tear down, rather than
+                    # dropping that context at the tool boundary.
+                    context: List[str] = []
+                    if started:
+                        context.append(f"started: {', '.join(started)}")
+                    context.extend(notes)
+                    context.extend(exc.notes)
+                    raise ToolError(exc.type, exc.message, notes=context) from exc
             state = await _state(b, b.graph, b.session_name, None, "normal")
             return ok({"started": started, "state": state}, notes=notes)
 
@@ -151,12 +162,13 @@ def build(b: Bridge) -> List[ToolSpec]:
     @tool_boundary
     async def rig_reset_routing(dry_run: bool = False) -> dict:
         """Rewire the rig to the loaded session's routing. Disconnects every rig-space link
-        (loopers/Carla) the session does not want, hand-made ones included, then connects
-        the session's missing edges. Only links change: no process is started or stopped,
+        (loopers/Carla) the session does not want, then connects the session's missing
+        edges. Hand-wiring made since the last session_load or session_save counts as
+        stray and will be removed. Only links change: no process is started or stopped,
         Carla and the looper are not reloaded, and loops in memory are untouched. Refuses
         when no session is loaded. Down units, absent nodes and dead ports cannot be fixed
-        by rewiring and are reported. `dry_run` lists the planned disconnects and connects
-        without applying them."""
+        by rewiring and are reported. Run with `dry_run=True` first to see the planned
+        disconnects and connects before applying them."""
         if dry_run:
             rewire = await do_rewire(_loaded_graph(b), BridgeOps(b), dry_run=True)
             return ok({"dry_run": True,

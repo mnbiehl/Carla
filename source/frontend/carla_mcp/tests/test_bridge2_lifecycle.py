@@ -5,6 +5,7 @@ import pytest
 
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
+from carla_mcp.bridge.result import ToolError
 from carla_mcp.bridge.tools import lifecycle
 from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import Link, ObservedState
@@ -433,3 +434,25 @@ def test_rig_up_state_is_degraded_after_a_failed_start():
     assert out["ok"] is True and out["notes"] == ["carla:main spawn failed: no pw-jack"]
     assert out["result"]["state"]["verdict"] == "DEGRADED: 1 issues"
     assert out["result"]["state"]["issues"] == ["down unit: carla:main"]
+
+
+def test_rig_up_failed_cold_load_reports_started_units_in_the_error_notes():
+    """Units are already started by the time a cold load FAILs; that context
+    must not be dropped when the ToolError crosses the tool boundary."""
+    b = _bridge()
+    load = AsyncMock(side_effect=ToolError("degraded", "FAILED: boom"))
+    with patch("carla_mcp.bridge.tools.sessions.load_session_into", new=load), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_a2j", return_value=None), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_carla_main",
+               new=AsyncMock(return_value=None)), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine",
+               new=AsyncMock(return_value=None)), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.unit_probe", return_value=False), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
+         patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.tools.lifecycle.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
+        out = asyncio.run(_tools(b)["rig_up"].fn(session="tues"))
+    assert out["ok"] is False
+    assert out["error"] == {"type": "degraded", "message": "FAILED: boom"}
+    assert out["notes"] == ["started: looper:engine, a2j, carla:main"]
