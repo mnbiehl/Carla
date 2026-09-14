@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
+from pathlib import Path
 from typing import List, Optional, Sequence
 
 from carla_mcp.backends import pw_link
 from carla_mcp.backends.legacy_sse import LEGACY_SSE_LONG_TIMEOUT_S
+from carla_mcp.backends.looper import LONG_OP_TIMEOUT_S
 from carla_mcp.backends.processes import a2j_running, ports_present, tcp_reachable
 from carla_mcp.backends.rpc import RpcError
 from carla_mcp.bridge.app import Bridge
@@ -14,10 +18,43 @@ from carla_mcp.rig.converge import RigOps
 from carla_mcp.rig.graph import RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import ObservedState, observe as rig_observe
 
+# loopers' SaveSessionAt replies "ok" as soon as the command is enqueued, well
+# before the (potentially 100+ MB) audio and project.loopers file are written
+# (loopers-engine/src/session.rs). looper_save_session_at below polls for the
+# project file to actually land instead of trusting the ack.
+LOOPER_PROJECT_FILE = "project.loopers"
+LOOPER_SAVE_POLL_S = 0.25
+LOOPER_SAVE_WAIT_S = LONG_OP_TIMEOUT_S
+LOOPER_SAVE_CLOCK_SLACK_MS = 2000
+
+
+def _read_looper_save_time_ms(project_path: Path) -> Optional[int]:
+    """Return project.loopers' save_time if the file is a complete, valid
+    JSON document with an integer save_time; None otherwise (missing file,
+    partial write, or a save_time we can't trust)."""
+    try:
+        raw = project_path.read_text()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    save_time = data.get("save_time")
+    if isinstance(save_time, bool) or not isinstance(save_time, int):
+        return None
+    return save_time
+
 
 class BridgeOps(RigOps):
     def __init__(self, bridge: Bridge):
         self.b = bridge
+        # Instance attributes (not module-level state) so tests can inject
+        # fast timings without monkeypatching module constants.
+        self._looper_save_poll_s = LOOPER_SAVE_POLL_S
+        self._looper_save_wait_s = LOOPER_SAVE_WAIT_S
 
     # ----- observation -------------------------------------------------
 
@@ -172,11 +209,27 @@ class BridgeOps(RigOps):
         return None
 
     async def looper_save_session_at(self, dir_path: str) -> Optional[str]:
+        request_ms = int(time.time() * 1000)
         try:
             await self.b.looper.save_session_at(dir_path)
         except RpcError as exc:
             return exc.message
-        return None
+
+        # The ack above only means the save was enqueued (remote.rs replies
+        # before any work happens). Poll for the project file actually
+        # landing with a fresh save_time before trusting the save is done.
+        project_path = Path(dir_path) / LOOPER_PROJECT_FILE
+        poll_s = self._looper_save_poll_s
+        wait_s = self._looper_save_wait_s
+        deadline = time.monotonic() + wait_s
+        while True:
+            save_time = _read_looper_save_time_ms(project_path)
+            if save_time is not None and save_time >= request_ms - LOOPER_SAVE_CLOCK_SLACK_MS:
+                return None
+            if time.monotonic() >= deadline:
+                return (f"looper save did not complete within {int(wait_s)}s "
+                        f"({dir_path}/{LOOPER_PROJECT_FILE})")
+            await asyncio.sleep(poll_s)
 
     async def looper_get_state(self) -> Optional[dict]:
         try:
