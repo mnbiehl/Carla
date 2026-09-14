@@ -225,3 +225,80 @@ def test_degraded_save_is_ok_with_report():
         out = asyncio.run(_tools(b)["session_save"].fn("tues"))
     assert out["ok"] is True and out["result"]["report"] == report
     assert b.session_name == "tues" and b.graph is not None
+
+
+# ----- FAILED loads are errors and leave the bridge graph unchanged ---------
+
+EMPTY_OBS = ObservedState(links=[], output_ports=[], input_ports=[], unit_status={})
+
+
+def _prior_graph(b):
+    g = RigGraph()
+    b.graph, b.session_name = g, "earlier"
+    return g
+
+
+def test_failed_load_is_degraded_error_and_leaves_bridge_graph_unchanged():
+    b = _bridge()
+    _seed(b, "tues")  # a readable session: only the FAILED report keeps the graph out
+    prior = _prior_graph(b)
+    with patch("carla_mcp.bridge.tools.sessions.do_load",
+               new=AsyncMock(return_value="FAILED: boom")) as load, \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=EMPTY_OBS)):
+        out = asyncio.run(_tools(b)["session_load"].fn("tues"))
+    assert load.await_count == 1
+    assert out["ok"] is False and out["error"] == {"type": "degraded", "message": "FAILED: boom"}
+    assert out["notes"] == []
+    assert b.graph is prior and b.session_name == "earlier"
+    assert not b.lock.locked()
+
+
+def test_failed_load_through_real_do_load_on_a_dir_without_a_session_file():
+    b = _bridge()
+    (b.config.session_dir / "empty").mkdir(parents=True)
+    prior = _prior_graph(b)
+    out = asyncio.run(_tools(b)["session_load"].fn("empty"))
+    assert out["ok"] is False and out["error"]["type"] == "degraded"
+    assert out["error"]["message"].startswith("FAILED: No rig session found at ")
+    assert b.graph is prior and b.session_name == "earlier"
+
+
+def test_failed_multiline_load_report_is_kept_as_a_note():
+    b = _bridge()
+    _seed(b, "tues")
+    report = "FAILED: boom\n[Notes]\n  detail"
+    with patch("carla_mcp.bridge.tools.sessions.do_load", new=AsyncMock(return_value=report)):
+        out = asyncio.run(_tools(b)["session_load"].fn("tues"))
+    assert out["error"] == {"type": "degraded", "message": "FAILED: boom"}
+    assert out["notes"] == [report]
+
+
+def test_degraded_load_sets_graph_and_returns_the_report():
+    b = _bridge()
+    _seed(b, "tues")
+    prior = _prior_graph(b)
+    report = "DEGRADED: 1 issues\n[Issues]\n  down unit: carla:main"
+    with patch("carla_mcp.bridge.tools.sessions.do_load", new=AsyncMock(return_value=report)), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=EMPTY_OBS)):
+        out = asyncio.run(_tools(b)["session_load"].fn("tues"))
+    assert out["ok"] is True and out["result"]["report"] == report
+    assert b.graph is not None and b.graph is not prior
+    assert list(b.graph.runtime_units) == ["carla:main"] and b.session_name == "tues"
+
+
+def test_cold_rig_up_with_a_failed_session_load_is_degraded_and_graph_unchanged():
+    b = _bridge()
+    _seed(b, "tues")
+    prior = _prior_graph(b)
+    with patch("carla_mcp.bridge.tools.lifecycle.units.start_a2j", return_value=None), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_carla_main", new=AsyncMock(return_value=None)), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(return_value=None)), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.unit_probe", return_value=False), \
+         patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
+         patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.tools.sessions.do_load", new=AsyncMock(return_value="FAILED: boom")), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=EMPTY_OBS)):
+        out = asyncio.run(_lifecycle_tools(b)["rig_up"].fn(session="tues"))
+    assert out["ok"] is False and out["error"] == {"type": "degraded", "message": "FAILED: boom"}
+    assert b.graph is prior and b.session_name == "earlier"
+    assert not b.lock.locked()

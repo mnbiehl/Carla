@@ -65,11 +65,15 @@ def _failed_save_notes(report: str, sdir: Path, created_dir: bool) -> List[str]:
 
 
 async def load_session_into(b: Bridge, name: str) -> List[str]:
-    """do_load into the bridge; returns notes. Sets b.graph / b.session_name."""
+    """do_load into the bridge; returns notes. Sets b.graph / b.session_name, except
+    on a FAILED load, which raises `degraded` and leaves both unchanged."""
     sdir = session_path(b, name)
     if not sdir.is_dir():
         raise ToolError("not_found", f"no rig session named {name!r} in {b.config.session_dir}")
     report = await do_load(name, sdir, BridgeOps(b))
+    if report.startswith("FAILED"):
+        raise ToolError("degraded", report.splitlines()[0],
+                        notes=[report] if "\n" in report.strip() else [])
     try:
         b.graph = read_session(sdir).graph
         b.session_name = name
