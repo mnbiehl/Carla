@@ -73,6 +73,15 @@ def test_export_import_go_through_legacy_sse_shim():
         assert asyncio.run(ops.export_rig_state("/chains")) is None
 
 
+def test_export_import_translate_rpc_error_from_legacy_sse():
+    b = _bridge(legacy_sse=AsyncMock(side_effect=RpcError("internal", "import_rig_state: boom")))
+    ops = BridgeOps(b)
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
+        result = asyncio.run(ops.import_rig_state({"nodes": []}, "/chains"))
+        assert result["messages"] and "boom" in result["messages"][0]
+        assert asyncio.run(ops.export_rig_state("/chains")) is None
+
+
 def test_start_and_stop_dispatch_by_kind():
     b = _bridge()
     ops = BridgeOps(b)
@@ -84,6 +93,34 @@ def test_start_and_stop_dispatch_by_kind():
         assert asyncio.run(ops.stop_unit(RuntimeUnit(name="a2j", kind="a2j"))) is None
     sc.assert_awaited_once_with(b); sl.assert_awaited_once_with(b); sa.assert_called_once_with(b)
     assert "unknown" in asyncio.run(ops.start_unit(RuntimeUnit(name="z", kind="zeppelin")))
+
+
+def test_stop_unit_carla_child_reports_errors_not_success():
+    b = _bridge()
+    ops = BridgeOps(b)
+    unit = RuntimeUnit(name="carla:strat", kind="carla-child", node="strat")
+
+    # Carla down: must not silently succeed.
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False):
+        err = asyncio.run(ops.stop_unit(unit))
+    assert err is not None and "not reachable" in err
+
+    # remove_node raises RpcError (e.g. legacy tool isError): surfaced as an error string.
+    b.legacy_sse = AsyncMock(side_effect=RpcError("internal", "remove_node: node not found"))
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
+        err = asyncio.run(ops.stop_unit(unit))
+    assert err is not None and "node not found" in err
+
+    # remove_node returns success: false: surfaced as an error string, not success.
+    b.legacy_sse = AsyncMock(return_value={"success": False, "message": "still connected"})
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
+        err = asyncio.run(ops.stop_unit(unit))
+    assert err == "still connected"
+
+    # remove_node succeeds: no error.
+    b.legacy_sse = AsyncMock(return_value={"success": True})
+    with patch("carla_mcp.bridge.ops.tcp_reachable", return_value=True):
+        assert asyncio.run(ops.stop_unit(unit)) is None
 
 
 def test_connect_disconnect_wait_ports():

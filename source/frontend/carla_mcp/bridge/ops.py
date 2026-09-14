@@ -85,7 +85,7 @@ class BridgeOps(RigOps):
         from carla_mcp.bridge import units
         if unit.kind == "carla-child":
             if not self.carla_up():
-                return None
+                return f"cannot remove {unit.node}: carla not reachable"
             try:
                 result = await self.b.legacy_sse(self.b.config.carla_sse_url, "remove_node", {"name": unit.node})
             except RpcError as exc:
