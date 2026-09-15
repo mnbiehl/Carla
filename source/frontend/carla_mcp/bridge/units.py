@@ -1,9 +1,14 @@
-"""Start/stop the rig's processes with readiness polling. None = success."""
+"""Start/stop the rig's processes with readiness polling. None = success.
+
+Probes (TCP, pw-link, pgrep) and process waits block; the async helpers run
+them through `asyncio.to_thread` so readiness polling never stalls the loop.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Callable, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -20,25 +25,27 @@ POLL_S = 0.5
 NOT_STARTED_BY_THIS_BRIDGE = "not started by this bridge; left running"
 
 
-def _stop_owned(b: Bridge, name: str, still_up: Callable[[], bool]) -> Optional[str]:
+async def _stop_owned(b: Bridge, name: str, still_up: Callable[[], bool]) -> Optional[str]:
     """Stop `name` only if this bridge's ProcessManager spawned it. A unit that is
     up but not ours (e.g. adopted after a bridge restart) is left running and
     reported; a unit that is already down is success. No re-adoption by pid."""
-    if b.processes.stop(name):
+    if await asyncio.to_thread(b.processes.stop, name):
         return None
-    return NOT_STARTED_BY_THIS_BRIDGE if still_up() else None
+    return NOT_STARTED_BY_THIS_BRIDGE if await asyncio.to_thread(still_up) else None
 
 
 async def _wait(predicate, timeout_s: float, still_alive) -> Optional[str]:
-    waited = 0.0
-    while waited < timeout_s:
-        if predicate():
+    """Poll `predicate` until true, the process dies, or `timeout_s` of wall
+    clock passes (a monotonic deadline: probe time counts, not just sleeps)."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if await asyncio.to_thread(predicate):
             return None
-        if not still_alive():
+        if not await asyncio.to_thread(still_alive):
             return "process exited before becoming ready"
+        if time.monotonic() >= deadline:
+            return f"not ready after {timeout_s:.0f}s"
         await asyncio.sleep(POLL_S)
-        waited += POLL_S
-    return f"not ready after {timeout_s:.0f}s"
 
 
 def _sse_host_port(b: Bridge) -> Tuple[str, int]:
@@ -54,9 +61,9 @@ def carla_running_without_worker(b: Bridge) -> bool:
 
 async def start_carla_main(b: Bridge) -> Optional[str]:
     port = b.config.carla_rpc_port
-    if tcp_reachable("127.0.0.1", port):
+    if await asyncio.to_thread(tcp_reachable, "127.0.0.1", port):
         return None
-    if carla_running_without_worker(b):
+    if await asyncio.to_thread(carla_running_without_worker, b):
         return (f"Carla is running without the RPC worker on {port}; not starting a second "
                 "instance (restart Carla from this branch)")
     env = dict(os.environ)
@@ -77,11 +84,11 @@ async def start_carla_main(b: Bridge) -> Optional[str]:
 
 
 async def stop_carla_main(b: Bridge) -> Optional[str]:
-    return _stop_owned(b, "carla:main", lambda: tcp_reachable("127.0.0.1", b.config.carla_rpc_port))
+    return await _stop_owned(b, "carla:main", lambda: tcp_reachable("127.0.0.1", b.config.carla_rpc_port))
 
 
 async def start_looper_engine(b: Bridge) -> Optional[str]:
-    if ports_present("loopers:", pw_link.list_outputs):
+    if await asyncio.to_thread(ports_present, "loopers:", pw_link.list_outputs):
         return None
     try:
         b.processes.spawn(UnitSpec(
@@ -98,7 +105,7 @@ async def start_looper_engine(b: Bridge) -> Optional[str]:
 
 
 async def stop_looper_engine(b: Bridge) -> Optional[str]:
-    return _stop_owned(b, "looper:engine", lambda: ports_present("loopers:", pw_link.list_outputs))
+    return await _stop_owned(b, "looper:engine", lambda: ports_present("loopers:", pw_link.list_outputs))
 
 
 def start_a2j(b: Bridge) -> Optional[str]:
@@ -113,5 +120,5 @@ def start_a2j(b: Bridge) -> Optional[str]:
     return None
 
 
-def stop_a2j(b: Bridge) -> Optional[str]:
-    return _stop_owned(b, "a2j", a2j_running)
+async def stop_a2j(b: Bridge) -> Optional[str]:
+    return await _stop_owned(b, "a2j", a2j_running)

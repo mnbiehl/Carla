@@ -1,4 +1,9 @@
-"""Production RigOps over the Bridge: pw-link + worker RPC + looper TCP + processes."""
+"""Production RigOps over the Bridge: pw-link + worker RPC + looper TCP + processes.
+
+Every pw-link, pgrep, socket probe and process wait is a blocking call; they
+run through `asyncio.to_thread` so a long converge never freezes the event
+loop (rig_state and the fail-fast lock must stay responsive meanwhile).
+"""
 
 from __future__ import annotations
 
@@ -85,6 +90,16 @@ class BridgeOps(RigOps):
         # which are down instead of reporting an empty (OK) unit table.
         units = list(graph.runtime_units.values()) if graph is not None else core_runtime_units()
 
+        # Gather every blocking probe off the loop first, then hand rig_observe
+        # plain callables over the snapshot.
+        links, outputs, inputs, *status = await asyncio.gather(
+            asyncio.to_thread(pw_link.list_links),
+            asyncio.to_thread(pw_link.list_outputs),
+            asyncio.to_thread(pw_link.list_inputs),
+            *(asyncio.to_thread(self.unit_probe, u) for u in units),
+        )
+        unit_status = {u.name: bool(up) for u, up in zip(units, status)}
+
         async def _state():
             try:
                 return await self.b.looper.get_state()
@@ -102,10 +117,10 @@ class BridgeOps(RigOps):
 
         return await rig_observe(
             units,
-            list_links=pw_link.list_links,
-            list_outputs=pw_link.list_outputs,
-            list_inputs=pw_link.list_inputs,
-            unit_probe=self.unit_probe,
+            list_links=lambda: links,
+            list_outputs=lambda: outputs,
+            list_inputs=lambda: inputs,
+            unit_probe=lambda u: unit_status.get(u.name, False),
             looper_get_state=_state,
             carla_handles=_handles,
         )
@@ -119,7 +134,7 @@ class BridgeOps(RigOps):
         if unit.kind == "looper-engine":
             return await units.start_looper_engine(self.b)
         if unit.kind == "a2j":
-            return units.start_a2j(self.b)
+            return await asyncio.to_thread(units.start_a2j, self.b)
         if unit.kind in ("looper-mcp", "carla-child"):
             return None
         return f"unknown unit kind: {unit.kind}"
@@ -141,27 +156,29 @@ class BridgeOps(RigOps):
         if unit.kind == "looper-engine":
             return await units.stop_looper_engine(self.b)
         if unit.kind == "a2j":
-            return units.stop_a2j(self.b)
+            return await units.stop_a2j(self.b)
         if unit.kind == "looper-mcp":
             return None
         return f"unknown unit kind: {unit.kind}"
 
     # ----- connections ---------------------------------------------------
 
-    def connect(self, src: str, dst: str) -> Optional[str]:
-        return pw_link.connect(src, dst)
+    async def connect(self, src: str, dst: str) -> Optional[str]:
+        return await asyncio.to_thread(pw_link.connect, src, dst)
 
-    def disconnect(self, src: str, dst: str) -> Optional[str]:
-        return pw_link.disconnect(src, dst)
+    async def disconnect(self, src: str, dst: str) -> Optional[str]:
+        return await asyncio.to_thread(pw_link.disconnect, src, dst)
 
-    def wait_ports(self, ports: Sequence[str], timeout_s: float = 15.0) -> List[str]:
+    async def wait_ports(self, ports: Sequence[str], timeout_s: float = 15.0) -> List[str]:
         deadline = time.monotonic() + timeout_s
         missing = list(ports)
         while missing and time.monotonic() < deadline:
-            live = set(pw_link.list_outputs()) | set(pw_link.list_inputs())
+            outputs, inputs = await asyncio.gather(asyncio.to_thread(pw_link.list_outputs),
+                                                   asyncio.to_thread(pw_link.list_inputs))
+            live = set(outputs) | set(inputs)
             missing = [p for p in missing if p not in live]
             if missing:
-                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         return missing
 
     # ----- Carla payload ---------------------------------------------------

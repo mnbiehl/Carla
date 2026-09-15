@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from typing import List, Optional
 
 from carla_mcp.backends.processes import tcp_reachable
@@ -89,26 +91,36 @@ def build(b: Bridge) -> List[ToolSpec]:
     @tool_boundary
     async def rig_up(session: Optional[str] = None) -> dict:
         """Start the rig's processes in order (looper-engine, a2j, carla-main); safe to repeat.
+        `started` lists units this call launched; `already_up` those it found running and
+        adopted (rig_down will not stop those unless this bridge started them earlier).
         With `session`, also load that saved rig session (clean-slate, converge, verify),
         but only on a cold start: if Carla or the looper is already up it refuses, because
         loading replaces the loops in memory. Use session_load for that."""
         async with exclusive(b):
             if session is not None:
-                already_up = _session_guard_units_up(b)
-                if already_up:
+                guard_up = await asyncio.to_thread(_session_guard_units_up, b)
+                if guard_up:
                     raise ToolError("validation", RIG_ALREADY_UP_MESSAGE,
-                                    notes=[f"up: {', '.join(already_up)}"])
+                                    notes=[f"up: {', '.join(guard_up)}"])
             started: List[str] = []
+            already_up: List[str] = []
             notes: List[str] = []
             # Start units in UNIT_START_ORDER, skipping those without a starter (legacy looper-mcp, session carla-child).
             for kind in sorted(_unit_starters.keys(), key=lambda k: UNIT_START_ORDER.get(k, 9)):
                 name, starter = _unit_starters[kind]
-                result = starter(b)
-                err = await result if hasattr(result, "__await__") else result
-                if err is None:
+                owned_before = b.processes.is_running(name)
+                if inspect.iscoroutinefunction(starter):
+                    err = await starter(b)
+                else:
+                    err = await asyncio.to_thread(starter, b)
+                if err is not None:
+                    notes.append(err)
+                elif b.processes.is_running(name) and not owned_before:
+                    # A starter succeeds both when it spawned the unit and when it
+                    # found one running; ownership in the ProcessManager tells which.
                     started.append(name)
                 else:
-                    notes.append(err)
+                    already_up.append(name)
             if session is not None:
                 from carla_mcp.bridge.tools.sessions import load_session_into
                 try:
@@ -120,11 +132,13 @@ def build(b: Bridge) -> List[ToolSpec]:
                     context: List[str] = []
                     if started:
                         context.append(f"started: {', '.join(started)}")
+                    if already_up:
+                        context.append(f"already up: {', '.join(already_up)}")
                     context.extend(notes)
                     context.extend(exc.notes)
                     raise ToolError(exc.type, exc.message, notes=context) from exc
             state = await _state(b, b.graph, b.session_name, None, "normal")
-            return ok({"started": started, "state": state}, notes=notes)
+            return ok({"started": started, "already_up": already_up, "state": state}, notes=notes)
 
     @tool_boundary
     async def rig_down() -> dict:

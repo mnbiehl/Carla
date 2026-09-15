@@ -122,13 +122,47 @@ def test_rig_up_starts_units_in_order_and_returns_state():
     with patch("carla_mcp.bridge.tools.lifecycle.units.start_a2j", side_effect=_start_a2j), \
          patch("carla_mcp.bridge.tools.lifecycle.units.start_carla_main", new=AsyncMock(side_effect=_start_carla)), \
          patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(side_effect=_start_looper)), \
+         patch.object(b.processes, "is_running", side_effect=lambda name: name in order_owned(order)), \
          patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
         out = asyncio.run(_tools(b)["rig_up"].fn())
     # Start order matches UNIT_START_ORDER: looper-engine (0) < a2j (2) < carla-main (3)
     assert order == ["looper", "a2j", "carla"]
     assert out["ok"] is True and out["result"]["started"] == ["a2j", "carla:main"]
+    assert out["result"]["already_up"] == []
     assert out["notes"] == ["looper:engine not ready after 10s"]
     assert "verdict" in out["result"]["state"]
+
+
+def order_owned(order):
+    """Units the fake ProcessManager 'owns': those whose starter has run."""
+    return {{"looper": "looper:engine", "a2j": "a2j", "carla": "carla:main"}[n] for n in order}
+
+
+def _owned_after_start(names):
+    """is_running side effect: a unit in `names` reads as owned from its second
+    probe on (its starter spawned it in between); any other unit never does."""
+    seen = {}
+
+    def probe(name):
+        seen[name] = seen.get(name, 0) + 1
+        return name in names and seen[name] >= 2
+    return probe
+
+
+def test_rig_up_reports_adopted_units_as_already_up_not_started():
+    """A starter succeeds both when it spawned the unit and when it found one
+    running. Only units the ProcessManager owns afterwards count as started."""
+    b = _bridge()
+    with patch("carla_mcp.bridge.tools.lifecycle.units.start_a2j", return_value=None), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_carla_main", new=AsyncMock(return_value=None)), \
+         patch("carla_mcp.bridge.tools.lifecycle.units.start_looper_engine", new=AsyncMock(return_value=None)), \
+         patch.object(b.processes, "is_running", side_effect=lambda name: name == "a2j"), \
+         patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
+        out = asyncio.run(_tools(b)["rig_up"].fn())
+    assert out["ok"] is True
+    # a2j was "owned" before its starter ran (a repeat rig_up), so it is not newly started.
+    assert out["result"]["started"] == []
+    assert out["result"]["already_up"] == ["looper:engine", "a2j", "carla:main"]
 
 
 def test_rig_down_clears_graph_and_reports():
@@ -440,6 +474,7 @@ def test_rig_up_failed_cold_load_reports_started_units_in_the_error_notes():
     """Units are already started by the time a cold load FAILs; that context
     must not be dropped when the ToolError crosses the tool boundary."""
     b = _bridge()
+    started_by_bridge = {"looper:engine", "carla:main"}  # a2j was already running
     load = AsyncMock(side_effect=ToolError("degraded", "FAILED: boom"))
     with patch("carla_mcp.bridge.tools.sessions.load_session_into", new=load), \
          patch("carla_mcp.bridge.tools.lifecycle.units.start_a2j", return_value=None), \
@@ -451,8 +486,9 @@ def test_rig_up_failed_cold_load_reports_started_units_in_the_error_notes():
          patch("carla_mcp.bridge.units.carla_gui_running", return_value=False), \
          patch("carla_mcp.bridge.units.tcp_reachable", return_value=False), \
          patch("carla_mcp.bridge.tools.lifecycle.tcp_reachable", return_value=False), \
+         patch.object(b.processes, "is_running", side_effect=_owned_after_start(started_by_bridge)), \
          patch("carla_mcp.bridge.tools.lifecycle.BridgeOps.observe", new=AsyncMock(return_value=_observed())):
         out = asyncio.run(_tools(b)["rig_up"].fn(session="tues"))
     assert out["ok"] is False
     assert out["error"] == {"type": "degraded", "message": "FAILED: boom"}
-    assert out["notes"] == ["started: looper:engine, a2j, carla:main"]
+    assert out["notes"] == ["started: looper:engine, carla:main", "already up: a2j"]

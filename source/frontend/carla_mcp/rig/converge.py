@@ -11,6 +11,7 @@ stdlib-only: imported by the main Carla process (system Python).
 
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -35,6 +36,10 @@ class RigOps:
 
     Mutating methods return None on success or an error string on failure
     (expected failures never raise).  Data methods return data or None.
+
+    `connect`, `disconnect` and `wait_ports` may be plain functions (the pure
+    test fakes) or coroutine functions (BridgeOps runs pw-link off the event
+    loop); the converge engine awaits their result when it is awaitable.
     """
 
     async def observe(self, graph: Optional[RigGraph]) -> ObservedState:
@@ -88,7 +93,7 @@ async def do_routing_reset(ops: RigOps) -> str:
     for link in observed.links:
         if not in_rig_port_space(link.src, link.dst):
             continue
-        err = ops.disconnect(link.src, link.dst)
+        err = await _result(ops.disconnect(link.src, link.dst))
         if err:
             failures.append(f"{link.src} -> {link.dst}: {err}")
         else:
@@ -152,6 +157,11 @@ def rig_state_for_import(graph: RigGraph, session_dir: Path) -> dict:
     return {"version": 1, "nodes": nodes, "edges": []}
 
 
+async def _result(value):
+    """Result of a RigOps link method, whether it returned a value or an awaitable."""
+    return await value if inspect.isawaitable(value) else value
+
+
 async def _apply_action(action: Action, graph: RigGraph, ops: RigOps,
                         notes: List[str]) -> None:
     """Execute one plan action, recording every failure in *notes*."""
@@ -164,14 +174,14 @@ async def _apply_action(action: Action, graph: RigGraph, ops: RigOps,
         if err:
             notes.append(f"start {unit.name}: {err}")
     elif action.op == "wait_ports":
-        for port in ops.wait_ports(list(action.ports)):
+        for port in await _result(ops.wait_ports(list(action.ports))):
             notes.append(f"port never appeared: {port}")
     elif action.op == "disconnect":
-        err = ops.disconnect(action.src, action.dst)
+        err = await _result(ops.disconnect(action.src, action.dst))
         if err:
             notes.append(f"disconnect {action.src} -> {action.dst}: {err}")
     elif action.op == "connect":
-        err = ops.connect(action.src, action.dst)
+        err = await _result(ops.connect(action.src, action.dst))
         if err:
             notes.append(f"connect {action.src} -> {action.dst}: {err}")
 
@@ -198,7 +208,7 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
     observed = await ops.observe(graph)
     for link in observed.links:
         if in_rig_port_space(link.src, link.dst):
-            err = ops.disconnect(link.src, link.dst)
+            err = await _result(ops.disconnect(link.src, link.dst))
             if err:
                 notes.append(f"clean-slate {link.src} -> {link.dst}: {err}")
 
@@ -225,7 +235,7 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
 
     # 4. Wait for every canonically-named port before wiring.
     wanted = sorted({p for n in graph.nodes.values() for p in canonical_ports(n)})
-    for port in ops.wait_ports(wanted):
+    for port in await _result(ops.wait_ports(wanted)):
         notes.append(f"port never appeared: {port}")
 
     # 5. Connect every desired pair (missing-only; slate is already clean).
@@ -237,7 +247,7 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
     for pair in expansion.pairs:
         if (pair.src, pair.dst) in live:
             continue
-        err = ops.connect(pair.src, pair.dst)
+        err = await _result(ops.connect(pair.src, pair.dst))
         if err:
             notes.append(f"connect {pair.src} -> {pair.dst}: {err}")
 

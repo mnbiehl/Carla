@@ -145,9 +145,10 @@ def _rig_isolation_guard(request, monkeypatch):
         _guard_argv(args, test_id)
         return real_run(args, *a, **kw)
 
-    def guarded_popen_init(self, args, *a, **kw):
-        _guard_argv(args, test_id)
-        return real_popen_init(self, args, *a, **kw)
+    def guarded_popen_init(self, *a, **kw):
+        # Popen(args, ...) and Popen(args=...) both reach here.
+        _guard_argv(a[0] if a else kw.get("args"), test_id)
+        return real_popen_init(self, *a, **kw)
 
     def guarded_check_output(args, *a, **kw):
         _guard_argv(args, test_id)

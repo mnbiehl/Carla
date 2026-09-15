@@ -140,11 +140,14 @@ def test_start_and_stop_dispatch_by_kind():
     ops = BridgeOps(b)
     with patch("carla_mcp.bridge.units.start_carla_main", new=AsyncMock(return_value=None)) as sc, \
          patch("carla_mcp.bridge.units.start_looper_engine", new=AsyncMock(return_value="boom")) as sl, \
-         patch("carla_mcp.bridge.units.stop_a2j", return_value=None) as sa:
+         patch("carla_mcp.bridge.units.stop_a2j", new=AsyncMock(return_value=None)) as sa, \
+         patch("carla_mcp.bridge.units.start_a2j", return_value="no a2j") as st_a2j:
         assert asyncio.run(ops.start_unit(RuntimeUnit(name="carla:main", kind="carla-main"))) is None
         assert asyncio.run(ops.start_unit(RuntimeUnit(name="looper:engine", kind="looper-engine"))) == "boom"
+        assert asyncio.run(ops.start_unit(RuntimeUnit(name="a2j", kind="a2j"))) == "no a2j"
         assert asyncio.run(ops.stop_unit(RuntimeUnit(name="a2j", kind="a2j"))) is None
-    sc.assert_awaited_once_with(b); sl.assert_awaited_once_with(b); sa.assert_called_once_with(b)
+    sc.assert_awaited_once_with(b); sl.assert_awaited_once_with(b); sa.assert_awaited_once_with(b)
+    st_a2j.assert_called_once_with(b)
     assert "unknown" in asyncio.run(ops.start_unit(RuntimeUnit(name="z", kind="zeppelin")))
 
 
@@ -182,5 +185,42 @@ def test_connect_disconnect_wait_ports():
          patch("carla_mcp.bridge.ops.pw_link.disconnect", return_value="gone") as d, \
          patch("carla_mcp.bridge.ops.pw_link.list_outputs", return_value=["a:1"]), \
          patch("carla_mcp.bridge.ops.pw_link.list_inputs", return_value=[]):
-        assert ops.connect("a:1", "b:1") is None and ops.disconnect("a:1", "b:1") == "gone"
-        assert ops.wait_ports(["a:1", "zz:9"], timeout_s=0.01) == ["zz:9"]
+        assert asyncio.run(ops.connect("a:1", "b:1")) is None
+        assert asyncio.run(ops.disconnect("a:1", "b:1")) == "gone"
+        assert asyncio.run(ops.wait_ports(["a:1", "zz:9"], timeout_s=0.01)) == ["zz:9"]
+    c.assert_called_once_with("a:1", "b:1"); d.assert_called_once_with("a:1", "b:1")
+
+
+def test_observe_and_wait_ports_keep_the_event_loop_free():
+    """Blocking probes run off the loop: a concurrent coroutine must make
+    progress while observe() and wait_ports() are inside a slow pw-link call."""
+    import time
+
+    ops = BridgeOps(_bridge())
+    ticks = []
+
+    async def ticker(stop):
+        while not stop.is_set():
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.005)
+
+    def slow_list():
+        time.sleep(0.08)
+        return []
+
+    async def scenario():
+        stop = asyncio.Event()
+        t = asyncio.ensure_future(ticker(stop))
+        await ops.observe(None)
+        await ops.wait_ports(["never:1"], timeout_s=0.1)
+        stop.set()
+        await t
+
+    with patch("carla_mcp.bridge.ops.pw_link.list_links", side_effect=slow_list), \
+         patch("carla_mcp.bridge.ops.pw_link.list_outputs", side_effect=slow_list), \
+         patch("carla_mcp.bridge.ops.pw_link.list_inputs", side_effect=slow_list), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.ops.a2j_running", return_value=False):
+        asyncio.run(scenario())
+    # ~180 ms of blocking probes; a frozen loop would yield only a handful of ticks.
+    assert len(ticks) > 10, len(ticks)

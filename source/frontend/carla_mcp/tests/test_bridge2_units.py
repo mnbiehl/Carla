@@ -117,7 +117,29 @@ def test_start_looper_engine_waits_for_ports(monkeypatch):
 
 def _stop_all(b):
     return [asyncio.run(units.stop_carla_main(b)), asyncio.run(units.stop_looper_engine(b)),
-            units.stop_a2j(b)]
+            asyncio.run(units.stop_a2j(b))]
+
+
+def test_wait_deadline_counts_probe_time_not_just_sleeps(monkeypatch):
+    """Each readiness probe can take as long as a TCP connect timeout; the
+    deadline is wall clock, so slow probes cannot stretch a 20 s wait to 30 s."""
+    import time
+    monkeypatch.setattr(units, "POLL_S", 0.001)
+
+    def slow_probe():
+        time.sleep(0.02)
+        return False
+
+    t0 = time.monotonic()
+    msg = asyncio.run(units._wait(slow_probe, 0.05, lambda: True))
+    elapsed = time.monotonic() - t0
+    assert msg == "not ready after 0s"
+    assert elapsed < 0.2, elapsed
+
+
+def test_wait_returns_ready_before_checking_the_deadline():
+    calls = iter([False, True])
+    assert asyncio.run(units._wait(lambda: next(calls), 10.0, lambda: True)) is None
 
 
 def _probes(up):
