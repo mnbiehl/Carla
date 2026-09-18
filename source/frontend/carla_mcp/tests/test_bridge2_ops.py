@@ -58,6 +58,21 @@ def test_observe_without_graph_probes_core_units():
     assert observed.unit_status == {"looper:engine": True, "a2j": True, "carla:main": False}
 
 
+def test_observe_never_raises_when_a_probe_or_listing_fails():
+    """A probe that blows up (fork EAGAIN, undecodable port name) reads as
+    down/empty; observation must not abort rig_state or a converge."""
+    b = _bridge()
+    ops = BridgeOps(b)
+    with patch("carla_mcp.bridge.ops.pw_link.list_links", side_effect=OSError("EAGAIN")), \
+         patch("carla_mcp.bridge.ops.pw_link.list_outputs", return_value=["loopers:loop0_out_l"]), \
+         patch("carla_mcp.bridge.ops.pw_link.list_inputs", side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")), \
+         patch("carla_mcp.bridge.ops.tcp_reachable", return_value=False), \
+         patch("carla_mcp.bridge.ops.a2j_running", side_effect=PermissionError("nope")):
+        observed = asyncio.run(ops.observe(None))
+    assert observed.links == []
+    assert observed.unit_status == {"looper:engine": True, "a2j": False, "carla:main": False}
+
+
 def test_carla_project_and_looper_payload_translate_errors_to_strings():
     b = _bridge()
     ops = BridgeOps(b)

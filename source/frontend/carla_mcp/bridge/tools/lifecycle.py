@@ -113,6 +113,8 @@ def build(b: Bridge) -> List[ToolSpec]:
                     err = await starter(b)
                 else:
                     err = await asyncio.to_thread(starter, b)
+                    if inspect.isawaitable(err):  # sync wrapper around an async starter
+                        err = await err
                 if err is not None:
                     notes.append(err)
                 elif b.processes.is_running(name) and not owned_before:

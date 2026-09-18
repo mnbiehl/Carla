@@ -43,9 +43,10 @@ async def _wait(predicate, timeout_s: float, still_alive) -> Optional[str]:
             return None
         if not await asyncio.to_thread(still_alive):
             return "process exited before becoming ready"
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return f"not ready after {timeout_s:.0f}s"
-        await asyncio.sleep(POLL_S)
+        await asyncio.sleep(min(POLL_S, remaining))
 
 
 def _sse_host_port(b: Bridge) -> Tuple[str, int]:

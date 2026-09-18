@@ -91,14 +91,17 @@ class BridgeOps(RigOps):
         units = list(graph.runtime_units.values()) if graph is not None else core_runtime_units()
 
         # Gather every blocking probe off the loop first, then hand rig_observe
-        # plain callables over the snapshot.
+        # plain callables over the snapshot. Observation must not raise: a
+        # probe that fails reads as empty/down, like rig_observe's own shielding.
         links, outputs, inputs, *status = await asyncio.gather(
             asyncio.to_thread(pw_link.list_links),
             asyncio.to_thread(pw_link.list_outputs),
             asyncio.to_thread(pw_link.list_inputs),
             *(asyncio.to_thread(self.unit_probe, u) for u in units),
+            return_exceptions=True,
         )
-        unit_status = {u.name: bool(up) for u, up in zip(units, status)}
+        links, outputs, inputs = ([] if isinstance(r, Exception) else r for r in (links, outputs, inputs))
+        unit_status = {u.name: not isinstance(up, Exception) and bool(up) for u, up in zip(units, status)}
 
         async def _state():
             try:
