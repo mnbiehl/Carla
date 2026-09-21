@@ -26,6 +26,7 @@ dev-dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["source/frontend/carla_mcp/tests", "source/frontend/looper_mcp/tests"]
 pythonpath = ["source/frontend"]
+markers = ["live: needs PipeWire, Carla build and loopers binary"]
 
 [build-system]
 requires = ["hatchling"]

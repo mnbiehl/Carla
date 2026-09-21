@@ -106,6 +106,13 @@ from patchcanvas import patchcanvas
 from widgets.digitalpeakmeter import DigitalPeakMeter
 from widgets.pixmapkeyboard import PixmapKeyboardHArea
 
+try:
+    from carla_mcp.worker import events as _rpcEvents
+except ImportError:  # worker package absent in this checkout
+    class _rpcEvents:  # type: ignore[no-redef]
+        @staticmethod
+        def dispatch(*_args): pass
+
 # ------------------------------------------------------------------------------------------------------------
 # Try Import OpenGL
 
@@ -275,13 +282,14 @@ class HostWindow(QMainWindow):
 
         self.fMcpServer = None
         self.fMcpServerEnabled = False
+        self.fRpcServer = None
         
         # Try to initialize MCP server
         self.fMcpImportError = None
         import sys
         print("🔍 DEBUG: Attempting to import MCP server module...", file=sys.stderr)
         try:
-            from carla_mcp import start_mcp_server, stop_mcp_server, is_mcp_server_running
+            from carla_mcp.main import start_mcp_server, stop_mcp_server, is_mcp_server_running
             self.fMcpServerEnabled = True
             print("✅ MCP server module imported successfully", file=sys.stderr)
         except ImportError as e:
@@ -722,6 +730,8 @@ class HostWindow(QMainWindow):
         if self.fMcpServerEnabled:
             print("🚀 Starting MCP server at application startup...", file=sys.stderr)
             QTimer.singleShot(100, self.slot_startMcpServer)
+
+        QTimer.singleShot(100, self.slot_startRpcWorker)
 
     # --------------------------------------------------------------------------------------------------------
     # Manage visibility state, needed for NSM
@@ -2816,7 +2826,7 @@ class HostWindow(QMainWindow):
             return
         
         try:
-            from carla_mcp import start_mcp_server
+            from carla_mcp.main import start_mcp_server
             success = start_mcp_server(self.host, gui_instance=self)
             if success:
                 self.fMcpServer = True
@@ -2835,7 +2845,7 @@ class HostWindow(QMainWindow):
             return
         
         try:
-            from carla_mcp import stop_mcp_server
+            from carla_mcp.main import stop_mcp_server
             stop_mcp_server()
             self.fMcpServer = None
             import sys
@@ -2843,7 +2853,35 @@ class HostWindow(QMainWindow):
         except Exception as e:
             import sys
             print(f"❌ Error stopping MCP server: {e}", file=sys.stderr)
-    
+
+    def slot_startRpcWorker(self):
+        import sys
+        if self.fRpcServer is not None:
+            return
+        try:
+            from carla_mcp.worker import attach
+        except ImportError as e:
+            print(f"RPC worker unavailable: {e}", file=sys.stderr)
+            return
+        port_str = os.getenv("CARLA_RPC_PORT", "8089")
+        port = None
+        try:
+            port = int(port_str)
+            self.fRpcServer = attach(self.host, port=port, client_name=self.fClientName)
+        except (OSError, ValueError) as e:
+            print(f"RPC worker failed to start on port {port if port is not None else port_str}: {e}",
+                  file=sys.stderr)
+            self.fRpcServer = None
+            return
+        print(f"RPC worker listening on 127.0.0.1:{self.fRpcServer.port}", file=sys.stderr)
+
+    def slot_stopRpcWorker(self):
+        if self.fRpcServer is None:
+            return
+        from carla_mcp.worker import detach
+        detach(self.fRpcServer)
+        self.fRpcServer = None
+
     @pyqtSlot(str)
     def _slot_mcpProjectSaved(self, filename):
         """Called from MCP thread after a project save"""
@@ -3206,7 +3244,9 @@ class HostWindow(QMainWindow):
 
         self.killTimers()
         self.saveSettings()
-        
+
+        self.slot_stopRpcWorker()
+
         # Stop MCP server on application close (not engine stop)
         if self.fMcpServerEnabled:
             print("🛑 Stopping MCP server on application close...", file=sys.stderr)
@@ -3339,6 +3379,8 @@ def engineCallback(host, action, pluginId, value1, value2, value3, valuef, value
     if False: host = CarlaHostNull()
 
     valueStr = charPtrToString(valueStr)
+
+    _rpcEvents.dispatch(action, pluginId, value1, value2, value3, valuef, valueStr)
 
     if action == ENGINE_CALLBACK_ENGINE_STARTED:
         host.processMode   = value1

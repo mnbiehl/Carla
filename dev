@@ -10,6 +10,10 @@ Commands:
   mcp           Run MCP server standalone (for testing)
   build         make -j$(nproc) (passes extra args through)
   test          uv run pytest (passes extra args through)
+  bridge        Run the new bridge server
+  worker        Run a worker instance (--client-name X --port N)
+  lint          Run Python lint rules (checks bridge/, backends/, worker/)
+  live          Run live audio tests (CARLA_MCP_LIVE=1 pytest)
   help          Show this help message
 EOF
 }
@@ -38,6 +42,23 @@ case "${1:-help}" in
     mcp)
         shift
         exec uv run python -m carla_mcp.main "$@"
+        ;;
+    bridge)
+        shift
+        exec pw-jack uv run python -m carla_mcp.bridge "$@"
+        ;;
+    worker)
+        shift
+        cd source/frontend && exec pw-jack "${CARLA_PYTHON_PATH:-/usr/bin/python3}" -m carla_mcp.worker "$@"
+        ;;
+    lint)
+        shift
+        uv run python linters/python_rules.py \
+            source/frontend/carla_mcp/bridge source/frontend/carla_mcp/backends source/frontend/carla_mcp/worker "$@"
+        ;;
+    live)
+        shift
+        CARLA_MCP_LIVE=1 exec uv run pytest source/frontend/carla_mcp/tests/live -q -s "$@"
         ;;
     build)
         shift

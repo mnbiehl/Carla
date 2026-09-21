@@ -200,7 +200,16 @@ class TestAutoWireMonitors:
 class TestConnectSystemOutput:
     """test_connect_last_plugin_to_system_output — last plugin connected to system group 2."""
 
-    def test_connect_last_plugin_to_system_output(self):
+    @patch("carla_mcp.tools.chain_builder.ensure_carla_to_monitors")
+    def test_connect_last_plugin_to_system_output(self, mock_ensure):
+        # connect_system_output=True also triggers ensure_carla_to_monitors(),
+        # which runs real pw-link subprocess calls in production (see
+        # utils/pw_link.py). Fake it here so this test never touches the
+        # live rig's PipeWire routing.
+        mock_ensure.return_value = {
+            "connected": 0, "already_connected": 0, "failed": 0,
+            "monitor_ports": [],
+        }
         bridge = _make_bridge()  # all stereo by default
 
         result = build_chain(bridge, ["EQ", "Compressor"], connect_system_output=True)

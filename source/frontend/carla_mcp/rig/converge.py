@@ -11,15 +11,18 @@ stdlib-only: imported by the main Carla process (system Python).
 
 from __future__ import annotations
 
+import inspect
 import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from carla_mcp.rig.graph import Node, RigGraph, RuntimeUnit
 from carla_mcp.rig.observe import ObservedState, loop_nodes_from_looper_state
 from carla_mcp.rig.reconcile import (
-    Action, LOOPER_MIDI_IN, UNIT_START_ORDER, canonical_ports, diff,
-    expand_edges, in_rig_port_space, plan, render_report,
+    Action, LOOPER_MIDI_IN, UNIT_START_ORDER, RigDiff, canonical_ports, diff,
+    edges_kept_for_absent_hardware, expand_edges, in_rig_port_space, is_rig_port, plan,
+    port_device, render_report, stand_in_links,
 )
 from carla_mcp.rig.session import (
     LOOPER_PROJECT, RigSession, SessionError, read_session,
@@ -27,6 +30,9 @@ from carla_mcp.rig.session import (
 )
 
 LOAD_PORT_TIMEOUT_S = 15.0
+# a2j enumerates its ports within a moment of starting; a MIDI device that is
+# not there by then is unplugged.
+A2J_PORT_GRACE_S = 3.0
 
 
 class RigOps:
@@ -34,6 +40,10 @@ class RigOps:
 
     Mutating methods return None on success or an error string on failure
     (expected failures never raise).  Data methods return data or None.
+
+    `connect`, `disconnect` and `wait_ports` may be plain functions (the pure
+    test fakes) or coroutine functions (BridgeOps runs pw-link off the event
+    loop); the converge engine awaits their result when it is awaitable.
     """
 
     async def observe(self, graph: Optional[RigGraph]) -> ObservedState:
@@ -87,7 +97,7 @@ async def do_routing_reset(ops: RigOps) -> str:
     for link in observed.links:
         if not in_rig_port_space(link.src, link.dst):
             continue
-        err = ops.disconnect(link.src, link.dst)
+        err = await _result(ops.disconnect(link.src, link.dst))
         if err:
             failures.append(f"{link.src} -> {link.dst}: {err}")
         else:
@@ -151,6 +161,11 @@ def rig_state_for_import(graph: RigGraph, session_dir: Path) -> dict:
     return {"version": 1, "nodes": nodes, "edges": []}
 
 
+async def _result(value):
+    """Result of a RigOps link method, whether it returned a value or an awaitable."""
+    return await value if inspect.isawaitable(value) else value
+
+
 async def _apply_action(action: Action, graph: RigGraph, ops: RigOps,
                         notes: List[str]) -> None:
     """Execute one plan action, recording every failure in *notes*."""
@@ -162,17 +177,29 @@ async def _apply_action(action: Action, graph: RigGraph, ops: RigOps,
         err = await ops.start_unit(unit)
         if err:
             notes.append(f"start {unit.name}: {err}")
-    elif action.op == "wait_ports":
-        for port in ops.wait_ports(list(action.ports)):
-            notes.append(f"port never appeared: {port}")
     elif action.op == "disconnect":
-        err = ops.disconnect(action.src, action.dst)
+        err = await _result(ops.disconnect(action.src, action.dst))
         if err:
             notes.append(f"disconnect {action.src} -> {action.dst}: {err}")
     elif action.op == "connect":
-        err = ops.connect(action.src, action.dst)
+        err = await _result(ops.connect(action.src, action.dst))
         if err:
             notes.append(f"connect {action.src} -> {action.dst}: {err}")
+
+
+async def _wait_for_own_ports(ports: Sequence[str], a2j_fresh: bool, ops: RigOps,
+                              notes: List[str]) -> None:
+    """Wait only for ports this load can make appear: rig clients, and a2j's
+    when a2j was started just now. Ports of other hardware are either live
+    already or unplugged, so waiting on them only delays the load; the diff
+    reports them as a device not found."""
+    own = [p for p in ports if is_rig_port(p)]
+    if own:
+        for port in await _result(ops.wait_ports(own)):
+            notes.append(f"port never appeared: {port}")
+    a2j = [p for p in ports if p.startswith("a2j:")] if a2j_fresh else []
+    if a2j:
+        await _result(ops.wait_ports(a2j, timeout_s=A2J_PORT_GRACE_S))
 
 
 async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
@@ -197,7 +224,7 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
     observed = await ops.observe(graph)
     for link in observed.links:
         if in_rig_port_space(link.src, link.dst):
-            err = ops.disconnect(link.src, link.dst)
+            err = await _result(ops.disconnect(link.src, link.dst))
             if err:
                 notes.append(f"clean-slate {link.src} -> {link.dst}: {err}")
 
@@ -224,19 +251,17 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
 
     # 4. Wait for every canonically-named port before wiring.
     wanted = sorted({p for n in graph.nodes.values() for p in canonical_ports(n)})
-    for port in ops.wait_ports(wanted):
+    for port in await _result(ops.wait_ports(wanted)):
         notes.append(f"port never appeared: {port}")
 
     # 5. Connect every desired pair (missing-only; slate is already clean).
     observed = await ops.observe(graph)
     expansion = expand_edges(graph, observed.output_ports, observed.input_ports)
-    for message in expansion.dead_ports:
-        notes.append(message)
     live = {(l.src, l.dst) for l in observed.links}
     for pair in expansion.pairs:
         if (pair.src, pair.dst) in live:
             continue
-        err = ops.connect(pair.src, pair.dst)
+        err = await _result(ops.connect(pair.src, pair.dst))
         if err:
             notes.append(f"connect {pair.src} -> {pair.dst}: {err}")
 
@@ -244,12 +269,118 @@ async def do_load(name: str, session_dir: Path, ops: RigOps) -> str:
     observed = await ops.observe(graph)
     d = diff(graph, observed)
     if not d.is_clean:
+        a2j_fresh = any(graph.runtime_units[name].kind == "a2j"
+                        for name in [u.name for u in down] + d.down_units)
         for action in plan(d, graph):
-            await _apply_action(action, graph, ops, notes)
+            if action.op == "wait_ports":
+                await _wait_for_own_ports(action.ports, a2j_fresh, ops, notes)
+            else:
+                await _apply_action(action, graph, ops, notes)
         observed = await ops.observe(graph)
         d = diff(graph, observed)
 
     return render_report(d.verdict, [("Issues", d.issues()), ("Notes", notes)])
+
+
+# The plan() steps a rewire may take. start_unit and wait_ports are dropped:
+# a rewire never changes processes and never blocks waiting for ports.
+REWIRE_OPS = ("disconnect", "connect")
+
+PORT_LISTING_UNAVAILABLE_NOTE = (
+    "port listing unavailable (pw-link -o/-i returned nothing); refusing to disconnect"
+)
+
+
+def _safe_disconnects(planned: List[Action], output_ports: set, input_ports: set) -> List[Action]:
+    """Drop any planned disconnect whose endpoints are not both confirmed live.
+
+    A disconnect is only trustworthy when its src is a known-live output port
+    and its dst is a known-live input port. If `pw-link -o`/`-i` fail or time
+    out (utils/pw_link.py returns [] on either), every live rig-space link
+    would otherwise look "unexpected" and this would tear down a healthy rig
+    mid-performance — even though `pw-link -l` (a separate subprocess) still
+    reported real links. Connects are unaffected: they are only ever planned
+    for port pairs already confirmed live by expand_edges.
+    """
+    return [a for a in planned
+           if a.op != "disconnect" or (a.src in output_ports and a.dst in input_ports)]
+
+
+def _link_text(action: Action) -> str:
+    return f"{action.src} -> {action.dst}"
+
+
+@dataclass
+class Rewire:
+    """Outcome of do_rewire.
+
+    `planned` is the disconnect/connect subset of plan() for the first
+    observation, disconnects first. `applied` holds the actions that succeeded
+    and `failures` the ones that did not; both stay empty on a dry run.
+    `diff` is the post-rewire diff, or the pre-rewire one on a dry run.
+    """
+
+    planned: List[Action]
+    diff: RigDiff
+    applied: List[Action] = field(default_factory=list)
+    failures: List[str] = field(default_factory=list)
+
+    @property
+    def unfixable(self) -> List[str]:
+        """Issues no link change can fix: down units, absent nodes, dead ports,
+        unresolved effects."""
+        return replace(self.diff, missing_edges=[], unexpected_connections=[]).issues()
+
+    def report(self) -> str:
+        return render_report(self.diff.verdict, [
+            ("Disconnected", [_link_text(a) for a in self.applied if a.op == "disconnect"]),
+            ("Connected", [_link_text(a) for a in self.applied if a.op == "connect"]),
+            ("Issues", self.diff.issues()),
+            ("Failures", self.failures),
+        ])
+
+
+async def do_rewire(graph: RigGraph, ops: RigOps, dry_run: bool = False) -> Rewire:
+    """Put rig routing back to *graph* by changing links only.
+
+    Disconnects live rig-space links the graph does not want and connects its
+    missing port pairs, using the same diff() -> plan() -> _apply_action path
+    as do_load's verify-and-retry step. Never starts or stops units, never
+    waits for ports, never loads Carla or looper payload. With *dry_run* the
+    plan is returned and nothing is applied.
+
+    Never disconnects a link unless both its endpoints are in the observed
+    output/input port lists; if those lists come back empty while links are
+    still reported, every disconnect is refused and the report notes why
+    (see PORT_LISTING_UNAVAILABLE_NOTE).
+    """
+    observed = await ops.observe(graph)
+    d = diff(graph, observed)
+    planned = [a for a in plan(d, graph) if a.op in REWIRE_OPS]
+
+    output_ports = set(observed.output_ports)
+    input_ports = set(observed.input_ports)
+    refusal: List[str] = []
+    if observed.links and (not output_ports or not input_ports):
+        # pw-link -l returned links but -o/-i did not: an inconsistent
+        # snapshot, not a rig with nothing stray. Refuse every disconnect
+        # rather than treating every live link as unexpected.
+        refusal.append(PORT_LISTING_UNAVAILABLE_NOTE)
+    planned = _safe_disconnects(planned, output_ports, input_ports)
+
+    if dry_run:
+        return Rewire(planned=planned, diff=d, failures=list(refusal))
+    applied: List[Action] = []
+    failures: List[str] = list(refusal)
+    for action in planned:
+        errors: List[str] = []
+        await _apply_action(action, graph, ops, errors)
+        if errors:
+            failures.extend(errors)
+        else:
+            applied.append(action)
+    after = diff(graph, await ops.observe(graph))
+    return Rewire(planned=planned, diff=after, applied=applied, failures=failures)
 
 
 _LOOP_PORT_RE = re.compile(r"^loopers:loop(\d+)_(in|out)_(l|r)$")
@@ -305,16 +436,72 @@ def _lift_link(graph: RigGraph, src: str, dst: str, notes: List[str]) -> None:
     graph.add_edge(src_node, dst_node, kind=kind, src_port=src, dst_port=dst)
 
 
-async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
-    """Capture the live rig as a v3 session and verify the written output."""
+def _keep_absent_hardware(graph: RigGraph, desired: RigGraph, observed: ObservedState,
+                          warnings: List[str]) -> set:
+    """Carry *desired*'s edges to unplugged hardware into *graph*, and return the
+    live links standing in for that hardware, which must not be lifted.
+
+    A session keeps its interface and controller while they are disconnected,
+    like a DAW project keeps its audio device; saving without them attached
+    must not lose their routing or adopt the onboard-audio fallback.
+    """
+    kept_per_device: dict = {}
+    live = set(observed.output_ports) | set(observed.input_ports)
+    for edge in edges_kept_for_absent_hardware(desired, observed.output_ports,
+                                               observed.input_ports):
+        ends = [desired.get_node(edge.src), desired.get_node(edge.dst)]
+        if any(n.kind not in ("endpoint", "midi") and not graph.has_node(n.name) for n in ends):
+            continue  # its loop or chain no longer exists
+        for node in ends:
+            if not graph.has_node(node.name):
+                graph.add_node(replace(node))
+        graph.add_edge(edge.src, edge.dst, gain_db=edge.gain_db, kind=edge.kind,
+                       src_port=edge.src_port, dst_port=edge.dst_port)
+        if edge.kind == "midi" and "a2j" in desired.runtime_units:
+            graph.add_runtime_unit(replace(desired.runtime_units["a2j"]))
+        if edge.src_port and edge.dst_port:
+            devices = {port_device(p) for p in (edge.src_port, edge.dst_port) if p not in live}
+        else:
+            devices = {n.jack_client or n.name for n in ends
+                       if n.kind in ("endpoint", "midi") and not is_rig_port(n.jack_client or n.name)}
+        for device in devices:
+            kept_per_device[device] = kept_per_device.get(device, 0) + 1
+    for device, count in kept_per_device.items():
+        warnings.append(f"device not found: {device}; kept its {count} session edges")
+
+    # Like diff(): a link the session itself wants is never a stand-in, even
+    # when it shares a rig port with a kept edge (two controllers into the
+    # looper, one of them unplugged).
+    wanted = {(p.src, p.dst) for p in expand_edges(desired, observed.output_ports,
+                                                   observed.input_ports).pairs}
+    stand_ins = stand_in_links(desired, [l for l in observed.links
+                                         if in_rig_port_space(l.src, l.dst)
+                                         and (l.src, l.dst) not in wanted],
+                               observed.output_ports, observed.input_ports)
+    for link in stand_ins:
+        warnings.append(f"not saved: {link.src} -> {link.dst} "
+                        "(stands in for a device that is not connected)")
+    return {(l.src, l.dst) for l in stand_ins}
+
+
+async def do_save(name: str, session_dir: Path, ops: RigOps,
+                  desired: Optional[RigGraph] = None) -> str:
+    """Capture the live rig as a v3 session and verify the written output.
+
+    *desired* is the session graph the rig was loaded from, if any. Its edges
+    to hardware that is not connected right now are kept (see
+    _keep_absent_hardware) and reported under Warnings; they do not degrade
+    the verdict.
+    """
     notes: List[str] = []
+    warnings: List[str] = []
     session_dir.mkdir(parents=True, exist_ok=True)
     graph = RigGraph()
     carla_project: Optional[str] = None
     looper_dir: Optional[str] = None
 
     export = await ops.export_rig_state(str(session_dir / "chains"))
-    if export is not None:
+    if export is not None and "nodes" in export:
         _graph_from_export(export, graph, session_dir, notes)
         err = await ops.save_carla_project(str(session_dir / "carla_project.carxp"))
         if err is None:
@@ -322,6 +509,10 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
         else:
             notes.append(f"carla project save: {err}")
         graph.add_runtime_unit(RuntimeUnit(name="carla:main", kind="carla-main"))
+    elif export is not None:
+        # Carla was reachable but the export call itself failed (timeout,
+        # tool error): report the real reason, not "carla not reachable".
+        notes.append(str(export.get("error", "carla export failed; no Carla state saved")))
     else:
         notes.append("carla not reachable; no Carla state saved")
 
@@ -365,6 +556,8 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
     observed = await ops.observe(graph)
     expansion = expand_edges(graph, observed.output_ports, observed.input_ports)
     covered = {(p.src, p.dst) for p in expansion.pairs}
+    if desired is not None:
+        covered |= _keep_absent_hardware(graph, desired, observed, warnings)
     for link in observed.links:
         if (link.src, link.dst) in covered:
             continue
@@ -382,11 +575,12 @@ async def do_save(name: str, session_dir: Path, ops: RigOps) -> str:
         reread = read_session(session_dir)
     except SessionError as exc:
         return render_report(f"FAILED: saved session does not re-read: {exc}",
-                             [("Notes", notes)])
+                             [("Notes", notes), ("Warnings", warnings)])
     problems = verify_session_files(reread, session_dir)
     issues = problems + notes
     verdict = "OK" if not issues else f"DEGRADED: {len(issues)} issues"
-    return render_report(verdict, [("Problems", problems), ("Notes", notes)])
+    return render_report(verdict, [("Problems", problems), ("Notes", notes),
+                                   ("Warnings", warnings)])
 
 
 # Stop order = reverse of UNIT_START_ORDER: carla-child -> carla-main ->
