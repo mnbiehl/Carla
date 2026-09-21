@@ -72,7 +72,7 @@ def _desired_for_save(b: Bridge, sdir: Path) -> Optional[RigGraph]:
         return b.graph
     try:
         return read_session(sdir).graph
-    except SessionError:
+    except (SessionError, KeyError, TypeError, ValueError):  # unreadable or malformed: the overwrite replaces it anyway
         return None
 
 

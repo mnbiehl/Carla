@@ -207,15 +207,20 @@ def edges_kept_for_absent_hardware(
 
     These stay in the session across a save, the way a DAW keeps a project's
     audio device while it is unplugged. An edge qualifies when everything it
-    is missing is outside rig port space and its rig side is still live; an
-    edge whose loop or chain is gone is a real change and does not qualify.
+    is missing belongs to a device outside rig port space that is not there at
+    all, and its rig side is still live. An edge whose loop or chain is gone
+    is a real change and does not qualify; neither does a missing port of a
+    live device (an a2j device replugged under a new ALSA client number, an
+    interface whose profile changed), where the live links are the truth.
     """
     live_all = set(live_outputs) | set(live_inputs)
+    live_devices = {port_device(p) for p in live_all}
     kept: List[Edge] = []
     for edge in graph.edges:
         if edge.src_port and edge.dst_port:
             missing = [p for p in (edge.src_port, edge.dst_port) if p not in live_all]
-            if missing and not any(is_rig_port(p) for p in missing):
+            if missing and not any(is_rig_port(p) or port_device(p) in live_devices
+                                   for p in missing):
                 kept.append(edge)
             continue
         src, dst = graph.get_node(edge.src), graph.get_node(edge.dst)
@@ -291,9 +296,12 @@ class RigDiff:
             count = sum(1 for dead in self.dead_edges
                         if any(port_device(p) == device for p in dead.missing))
             names = ", ".join(p.partition(":")[2] for p in ports)
-            out.append(f"device not found: {device} ({count} session edges kept, "
-                       f"not connected; ports: {names})")
-        out += [f"port not live: {port} ({n} session edges kept, not connected)"
+            # Only hardware outside the rig is kept across a save; a rig client
+            # that is gone (a chain that is down) is just not connected.
+            kept = "not connected" if is_rig_port(f"{device}:") else "kept, not connected"
+            out.append(f"device not found: {device} ({count} session edges {kept}; "
+                       f"ports: {names})")
+        out += [f"port not live: {port} ({n} session edges not connected)"
                 for port, n in edges_on.items() if port_device(port) not in self.absent_devices]
         return out
 

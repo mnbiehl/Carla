@@ -469,8 +469,14 @@ def _keep_absent_hardware(graph: RigGraph, desired: RigGraph, observed: Observed
     for device, count in kept_per_device.items():
         warnings.append(f"device not found: {device}; kept its {count} session edges")
 
+    # Like diff(): a link the session itself wants is never a stand-in, even
+    # when it shares a rig port with a kept edge (two controllers into the
+    # looper, one of them unplugged).
+    wanted = {(p.src, p.dst) for p in expand_edges(desired, observed.output_ports,
+                                                   observed.input_ports).pairs}
     stand_ins = stand_in_links(desired, [l for l in observed.links
-                                         if in_rig_port_space(l.src, l.dst)],
+                                         if in_rig_port_space(l.src, l.dst)
+                                         and (l.src, l.dst) not in wanted],
                                observed.output_ports, observed.input_ports)
     for link in stand_ins:
         warnings.append(f"not saved: {link.src} -> {link.dst} "

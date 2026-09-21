@@ -63,7 +63,7 @@ def test_missing_port_of_a_live_device_is_a_port_line(tmp_path):
     ops = UnpluggedOps()
     ops.outputs.append(f"{SCARLETT_IN}:capture_AUX1")  # interface present, AUX0 gone
     issues = diff(graph, _observed(ops)).issues()
-    assert f"port not live: {CAPTURE} (2 session edges kept, not connected)" in issues
+    assert f"port not live: {CAPTURE} (2 session edges not connected)" in issues
     assert not any(i.startswith(f"device not found: {SCARLETT_IN}") for i in issues)
 
 
@@ -90,6 +90,46 @@ def test_save_without_the_hardware_keeps_its_routing(tmp_path):
     assert f"device not found: {SCARLETT_IN}; kept its 2 session edges" in report
     assert "device not found: a2j:Pacer; kept its 1 session edges" in report
     assert f"not saved: {MIDI_THROUGH} -> {MIDI_IN}" in report
+
+
+KEYSTATION = "a2j:Keystation [40] (capture): Keystation MIDI 1"
+
+
+def test_a_second_controller_the_session_wants_is_not_a_stand_in(tmp_path):
+    with_both = SaveFakeOps()
+    with_both.outputs.append(KEYSTATION)
+    with_both.links.append(Link(KEYSTATION, MIDI_IN))
+    asyncio.run(do_save("both", tmp_path / "both", with_both))
+    desired = read_session(tmp_path / "both").graph
+
+    ops = UnpluggedOps()  # PACER and Scarlett gone, Keystation still linked
+    ops.outputs.append(KEYSTATION)
+    ops.links.append(Link(KEYSTATION, MIDI_IN))
+    report = asyncio.run(do_save("resave", tmp_path / "resave", ops, desired=desired))
+    ports = {(e.src_port, e.dst_port) for e in read_session(tmp_path / "resave").graph.edges}
+    assert (KEYSTATION, MIDI_IN) in ports and (PACER, MIDI_IN) in ports
+    assert f"not saved: {KEYSTATION}" not in report
+
+
+def test_a_device_replugged_under_a_new_client_number_replaces_its_stale_edge(tmp_path):
+    desired = _saved_with_hardware(tmp_path)
+    replugged = PACER.replace("[32]", "[36]")
+    ops = SaveFakeOps()
+    ops.outputs = [replugged if p == PACER else p for p in ops.outputs]
+    ops.links = [Link(replugged, MIDI_IN) if l.src == PACER else l for l in ops.links]
+    report = asyncio.run(do_save("resave", tmp_path / "resave", ops, desired=desired))
+    midi = {e.src_port for e in read_session(tmp_path / "resave").graph.edges if e.kind == "midi"}
+    assert midi == {replugged}
+    assert "[Warnings]" not in report
+
+
+def test_a_corrupt_session_being_overwritten_does_not_block_the_save(tmp_path):
+    from carla_mcp.bridge.app import Bridge
+    from carla_mcp.bridge.tools.sessions import _desired_for_save
+    sdir = tmp_path / "bad"
+    sdir.mkdir()
+    (sdir / "rig_session.json").write_text('{"version": 3, "nodes": [{}], "edges": []}')
+    assert _desired_for_save(Bridge.for_tests(), sdir) is None
 
 
 def test_save_without_a_loaded_session_still_lifts_every_live_link(tmp_path):
