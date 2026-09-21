@@ -43,7 +43,7 @@ def test_mutating_tools_fail_fast_while_a_save_holds_the_lock():
     async def run():
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def blocking_save(name, sdir, ops):
+        async def blocking_save(name, sdir, ops, desired=None):
             entered.set()
             await release.wait()
             (sdir / "looper").mkdir(parents=True, exist_ok=True)

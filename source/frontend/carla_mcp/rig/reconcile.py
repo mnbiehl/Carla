@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from carla_mcp.rig.graph import Node, RigGraph
+from carla_mcp.rig.graph import Edge, Node, RigGraph
 from carla_mcp.rig.observe import Link, ObservedState
 
 LOOPER_MIDI_IN = "loopers:loopers_midi_in"
@@ -22,6 +22,24 @@ LOOPER_MIDI_IN = "loopers:loopers_midi_in"
 _MONITOR_INPUT_RE = re.compile(r"^alsa_output\..*pro-output.*:playback_AUX\d+$")
 
 _RIG_CLIENT_RE = re.compile(r"^(Carla|CarlaChain_[^:]+|loopers):")
+
+# a2j names ports "a2j:<device> [<alsa client>] (capture|playback): <port>".
+_A2J_DEVICE_RE = re.compile(r"^(.*?) \[\d+\] \((?:capture|playback)\)")
+
+
+def is_rig_port(port: str) -> bool:
+    """True for a port on a client the rig itself runs (Carla, a chain, loopers)."""
+    return bool(_RIG_CLIENT_RE.match(port))
+
+
+def port_device(port: str) -> str:
+    """The device a port belongs to: its client, or the a2j-bridged MIDI device."""
+    client, _, rest = port.partition(":")
+    if client == "a2j":
+        m = _A2J_DEVICE_RE.match(rest)
+        if m:
+            return f"a2j:{m.group(1)}"
+    return client
 
 
 @dataclass(frozen=True)
@@ -114,12 +132,27 @@ def canonical_ports(node: Node) -> List[str]:
     return []
 
 
+@dataclass(frozen=True)
+class DeadEdge:
+    """An explicit-port edge that cannot connect: some of its ports are not live."""
+
+    src: str
+    dst: str
+    missing: Tuple[str, ...]
+
+
+def _dead_edge_text(dead: DeadEdge) -> str:
+    return f"edge {dead.src} -> {dead.dst}: port(s) not live: " + ", ".join(dead.missing)
+
+
 @dataclass
 class Expansion:
     """Result of expanding node-level edges into concrete port pairs."""
 
     pairs: List[PortPair] = field(default_factory=list)
     dead_ports: List[str] = field(default_factory=list)
+    dead_edges: List[DeadEdge] = field(default_factory=list)
+    absent_devices: List[str] = field(default_factory=list)
     absent_nodes: List[str] = field(default_factory=list)
     waitable_ports: List[str] = field(default_factory=list)
 
@@ -130,6 +163,7 @@ def expand_edges(
     """Expand every desired edge to live port pairs; name what can't resolve."""
     exp = Expansion()
     live_all = set(live_outputs) | set(live_inputs)
+    live_devices = {port_device(p) for p in live_all}
 
     for node in graph.nodes.values():
         outs = node_output_ports(node, live_outputs)
@@ -142,11 +176,14 @@ def expand_edges(
         if edge.src_port and edge.dst_port:
             missing = [p for p in (edge.src_port, edge.dst_port) if p not in live_all]
             if missing:
-                exp.dead_ports.append(
-                    f"edge {edge.src} -> {edge.dst}: port(s) not live: "
-                    + ", ".join(missing)
-                )
+                dead = DeadEdge(edge.src, edge.dst, tuple(missing))
+                exp.dead_edges.append(dead)
+                exp.dead_ports.append(_dead_edge_text(dead))
                 exp.waitable_ports.extend(missing)
+                for port in missing:
+                    device = port_device(port)
+                    if device not in live_devices and device not in exp.absent_devices:
+                        exp.absent_devices.append(device)
             else:
                 exp.pairs.append(PortPair(edge.src_port, edge.dst_port, edge.kind))
             continue
@@ -163,6 +200,59 @@ def expand_edges(
     return exp
 
 
+def edges_kept_for_absent_hardware(
+    graph: RigGraph, live_outputs: List[str], live_inputs: List[str]
+) -> List[Edge]:
+    """Desired edges that are dead only because external hardware is not there.
+
+    These stay in the session across a save, the way a DAW keeps a project's
+    audio device while it is unplugged. An edge qualifies when everything it
+    is missing is outside rig port space and its rig side is still live; an
+    edge whose loop or chain is gone is a real change and does not qualify.
+    """
+    live_all = set(live_outputs) | set(live_inputs)
+    kept: List[Edge] = []
+    for edge in graph.edges:
+        if edge.src_port and edge.dst_port:
+            missing = [p for p in (edge.src_port, edge.dst_port) if p not in live_all]
+            if missing and not any(is_rig_port(p) for p in missing):
+                kept.append(edge)
+            continue
+        src, dst = graph.get_node(edge.src), graph.get_node(edge.dst)
+        dead = [n for n, ports in ((src, node_output_ports(src, live_outputs)),
+                                   (dst, node_input_ports(dst, live_inputs))) if not ports]
+        if dead and all(n.kind in ("endpoint", "midi") and not is_rig_port(n.jack_client or n.name)
+                        for n in dead):
+            kept.append(edge)
+    return kept
+
+
+def stand_in_links(
+    graph: RigGraph, links: List[Link], live_outputs: List[str], live_inputs: List[str]
+) -> List[Link]:
+    """Live links that replace an absent session device with other hardware.
+
+    With the session's interface unplugged, the PipeWire session manager links
+    e.g. the metronome to the onboard speakers. Such a link shares its rig end
+    with an edge kept by edges_kept_for_absent_hardware and has other hardware
+    on its far end. It is not part of the session.
+    """
+    live_all = set(live_outputs) | set(live_inputs)
+    rig_srcs, rig_dsts = set(), set()
+    for edge in edges_kept_for_absent_hardware(graph, live_outputs, live_inputs):
+        if edge.src_port and edge.dst_port:
+            if edge.src_port in live_all:
+                rig_srcs.add(edge.src_port)
+            if edge.dst_port in live_all:
+                rig_dsts.add(edge.dst_port)
+        else:
+            rig_srcs.update(node_output_ports(graph.get_node(edge.src), live_outputs))
+            rig_dsts.update(node_input_ports(graph.get_node(edge.dst), live_inputs))
+    return [l for l in links
+            if (l.src in rig_srcs and not is_rig_port(l.dst))
+            or (l.dst in rig_dsts and not is_rig_port(l.src))]
+
+
 def in_rig_port_space(src: str, dst: str) -> bool:
     """True when a connection touches rig-owned port space.
 
@@ -170,7 +260,7 @@ def in_rig_port_space(src: str, dst: str) -> bool:
     a CarlaChain_* child, or the loopers engine (audio or MIDI).  Unrelated
     desktop audio never matches and is never touched.
     """
-    return bool(_RIG_CLIENT_RE.match(src) or _RIG_CLIENT_RE.match(dst))
+    return is_rig_port(src) or is_rig_port(dst)
 
 
 @dataclass
@@ -182,17 +272,44 @@ class RigDiff:
     absent_nodes: List[str] = field(default_factory=list)
     down_units: List[str] = field(default_factory=list)
     dead_ports: List[str] = field(default_factory=list)
+    dead_edges: List[DeadEdge] = field(default_factory=list)
+    absent_devices: List[str] = field(default_factory=list)
+    stand_in_connections: List[Link] = field(default_factory=list)
     unresolved_effects: List[str] = field(default_factory=list)
     waitable_ports: List[str] = field(default_factory=list)
 
+    def _missing_port_issues(self) -> List[str]:
+        """One line per absent device (or per missing port of a live device),
+        however many session edges hang off it."""
+        edges_on: Dict[str, int] = {}
+        for dead in self.dead_edges:
+            for port in dead.missing:
+                edges_on[port] = edges_on.get(port, 0) + 1
+        out: List[str] = []
+        for device in self.absent_devices:
+            ports = [p for p in edges_on if port_device(p) == device]
+            count = sum(1 for dead in self.dead_edges
+                        if any(port_device(p) == device for p in dead.missing))
+            names = ", ".join(p.partition(":")[2] for p in ports)
+            out.append(f"device not found: {device} ({count} session edges kept, "
+                       f"not connected; ports: {names})")
+        out += [f"port not live: {port} ({n} session edges kept, not connected)"
+                for port, n in edges_on.items() if port_device(port) not in self.absent_devices]
+        return out
+
     def issues(self) -> List[str]:
-        """Every deviation as a report-ready line. Nothing summarized away."""
+        """Every deviation as a report-ready line. A missing device or port is
+        one line carrying its edge count; its endpoint nodes and edges are not
+        repeated as absent-node and dead-port lines."""
+        grouped = {_dead_edge_text(dead) for dead in self.dead_edges}
+        explained = {name for dead in self.dead_edges for name in (dead.src, dead.dst)}
         out: List[str] = []
         out += [f"missing edge: {p.src} -> {p.dst} ({p.kind})" for p in self.missing_edges]
         out += [f"unexpected connection: {l.src} -> {l.dst}" for l in self.unexpected_connections]
-        out += [f"absent node: {n}" for n in self.absent_nodes]
+        out += [f"absent node: {n}" for n in self.absent_nodes if n not in explained]
         out += [f"down unit: {u}" for u in self.down_units]
-        out += [f"dead port reference: {m}" for m in self.dead_ports]
+        out += self._missing_port_issues()
+        out += [f"dead port reference: {m}" for m in self.dead_ports if m not in grouped]
         out += [f"unresolved effect: {m}" for m in self.unresolved_effects]
         return out
 
@@ -244,6 +361,10 @@ def diff(graph: RigGraph, observed: ObservedState) -> RigDiff:
         absent_nodes=exp.absent_nodes,
         down_units=down,
         dead_ports=exp.dead_ports,
+        dead_edges=exp.dead_edges,
+        absent_devices=exp.absent_devices,
+        stand_in_connections=stand_in_links(graph, unexpected, observed.output_ports,
+                                            observed.input_ports),
         unresolved_effects=unresolved,
         waitable_ports=sorted(set(exp.waitable_ports)),
     )

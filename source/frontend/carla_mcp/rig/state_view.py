@@ -65,7 +65,11 @@ def build_state(graph: Optional[RigGraph], observed: ObservedState, loopers: Lis
         # category (missing edges, absent nodes, down units, dead port
         # references, unresolved effects) stays an issue.
         issues = [i for i in d.issues() if not i.startswith("unexpected connection: ")]
+        stand_ins = {(l.src, l.dst) for l in d.stand_in_connections}
         notes.extend(
+            f"stand-in: {l.src} -> {l.dst} replaces a session device that is not "
+            "connected (not saved by session_save)"
+            if (l.src, l.dst) in stand_ins else
             f"hand edit: unexpected connection {l.src} -> {l.dst} "
             "(absorbed on next session_save)"
             for l in d.unexpected_connections

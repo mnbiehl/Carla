@@ -72,7 +72,7 @@ def test_session_save_refuses_overwrite_then_saves():
     out = asyncio.run(_tools(b)["session_save"].fn("tues"))
     assert out["ok"] is False and out["error"]["type"] == "validation"
 
-    async def fake_save(name, sdir, ops):
+    async def fake_save(name, sdir, ops, desired=None):
         (sdir / "looper").mkdir(exist_ok=True)
         (sdir / "looper" / "project.loopers").write_text("{}")
         return "OK\n"
@@ -96,7 +96,7 @@ def test_session_save_rejects_invalid_names(name):
     b = _bridge()
     before = _snapshot(b.config.session_dir)
 
-    async def unreachable_save(name, sdir, ops):
+    async def unreachable_save(name, sdir, ops, desired=None):
         raise AssertionError("do_save must not run for an invalid session name")
 
     with patch("carla_mcp.bridge.tools.sessions.do_save", new=unreachable_save):
@@ -145,7 +145,7 @@ def test_failed_save_on_fresh_dir_is_degraded_error_and_removes_the_dir():
     b = _bridge()
     sdir = b.config.session_dir / "tues"
 
-    async def failing_save(name, d, ops):
+    async def failing_save(name, d, ops, desired=None):
         d.mkdir(parents=True, exist_ok=True)  # what do_save does before giving up
         return NOTHING
 
@@ -172,7 +172,7 @@ def test_failed_overwrite_leaves_existing_dir_untouched():
     sdir = _seed(b, "tues")
     before = _snapshot(sdir)
 
-    async def failing_save(name, d, ops):
+    async def failing_save(name, d, ops, desired=None):
         return NOTHING
 
     with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
@@ -187,7 +187,7 @@ def test_failed_overwrite_of_existing_empty_dir_is_not_removed():
     sdir = b.config.session_dir / "tues"
     sdir.mkdir(parents=True)
 
-    async def failing_save(name, d, ops):
+    async def failing_save(name, d, ops, desired=None):
         return NOTHING
 
     with patch("carla_mcp.bridge.tools.sessions.do_save", new=failing_save):
@@ -200,7 +200,7 @@ def test_failed_save_that_wrote_files_keeps_them_and_reports_the_full_report():
     sdir = b.config.session_dir / "tues"
     report = "FAILED: saved session does not re-read: bad json\n[Notes]\n  carla not reachable"
 
-    async def failing_save(name, d, ops):
+    async def failing_save(name, d, ops, desired=None):
         d.mkdir(parents=True)
         (d / "rig_session.json").write_text("{")
         return report
@@ -216,7 +216,7 @@ def test_degraded_save_is_ok_with_report():
     b = _bridge()
     report = "DEGRADED: 1 issues\n[Notes]\n  carla not reachable; no Carla state saved"
 
-    async def degraded_save(name, d, ops):
+    async def degraded_save(name, d, ops, desired=None):
         d.mkdir(parents=True, exist_ok=True)
         write_session(RigSession(name=name, graph=RigGraph(), looper_session_dir="looper"), d)
         return report
@@ -302,3 +302,35 @@ def test_cold_rig_up_with_a_failed_session_load_is_degraded_and_graph_unchanged(
     assert out["ok"] is False and out["error"] == {"type": "degraded", "message": "FAILED: boom"}
     assert b.graph is prior and b.session_name == "earlier"
     assert not b.lock.locked()
+
+
+# ----- the save is told which routing to keep for unplugged hardware ---------
+
+def _captured_desired(b, name):
+    seen = {}
+
+    async def fake_save(name, sdir, ops, desired=None):
+        seen["desired"] = desired
+        return "OK\n"
+
+    with patch("carla_mcp.bridge.tools.sessions.do_save", new=fake_save):
+        asyncio.run(_tools(b)["session_save"].fn(name, overwrite=True))
+    return seen["desired"]
+
+
+def test_save_passes_the_loaded_graph_as_desired():
+    b = _bridge()
+    _seed(b, "tues")
+    loaded = b.graph = RigGraph()
+    assert _captured_desired(b, "tues") is loaded
+
+
+def test_save_after_a_bridge_restart_falls_back_to_the_session_being_overwritten():
+    b = _bridge()
+    _seed(b, "tues")
+    desired = _captured_desired(b, "tues")
+    assert desired is not None and "carla:main" in desired.runtime_units
+
+
+def test_save_to_a_new_name_with_nothing_loaded_has_no_desired_graph():
+    assert _captured_desired(_bridge(), "fresh") is None
