@@ -238,3 +238,39 @@ async def test_discover_clears_previous_on_rediscovery():
     assert mock_bridge.remove_tool.call_count == 2
     assert count == 1
     assert _registered_tools == {"new_tool"}
+
+
+def _hanging_session_patches(mock_sse, mock_cs):
+    """Wire sse_client/ClientSession mocks whose call_tool never returns."""
+    async def never(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    session.call_tool = never
+    mock_sse.return_value.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+    mock_sse.return_value.__aexit__ = AsyncMock(return_value=False)
+    mock_cs.return_value.__aenter__ = AsyncMock(return_value=session)
+    mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+
+
+@pytest.mark.asyncio
+async def test_forward_times_out_with_a_clear_error():
+    from carla_mcp import tool_proxy
+
+    with patch("carla_mcp.tool_proxy.sse_client") as mock_sse, patch(
+        "carla_mcp.tool_proxy.ClientSession"
+    ) as mock_cs, patch.object(tool_proxy, "FORWARD_TIMEOUT_S", 0.05):
+        _hanging_session_patches(mock_sse, mock_cs)
+        reply = await asyncio.wait_for(
+            tool_proxy._forward_tool_call("list_io", {}, "http://localhost:3001/sse"), 2
+        )
+    assert "list_io" in reply and "timed out" in reply
+
+
+def test_slow_tools_get_a_longer_timeout():
+    from carla_mcp import tool_proxy
+
+    assert tool_proxy.forward_timeout("discover_all_plugins") > tool_proxy.FORWARD_TIMEOUT_S
+    assert tool_proxy.forward_timeout("load_project") > tool_proxy.FORWARD_TIMEOUT_S
+    assert tool_proxy.forward_timeout("list_io") == tool_proxy.FORWARD_TIMEOUT_S
