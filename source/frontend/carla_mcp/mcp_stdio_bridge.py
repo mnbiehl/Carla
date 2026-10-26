@@ -113,6 +113,24 @@ _current_graph: RigGraph | None = None
 LOOPER_JSON_PORT = int(os.getenv("LOOPER_JSON_PORT", "8088"))
 
 
+def _spawn_child(argv: list[str], log, **kwargs) -> subprocess.Popen:
+    """Start a rig process detached from the bridge's MCP stdio.
+
+    stdin is this bridge's JSON-RPC pipe: a child that inherits it and reads
+    it (``loopers`` reads stdin lines in headless mode) steals requests, and
+    those tool calls never get a reply. start_new_session keeps a hangup or
+    group signal aimed at the MCP client from reaching the rig.
+    """
+    return subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=log,
+        start_new_session=True,
+        **kwargs,
+    )
+
+
 def _is_carla_running() -> bool:
     """Check if our managed Carla process is running."""
     global _carla_process
@@ -149,12 +167,11 @@ async def _start_carla() -> str:
     # The bridge proxies tool calls to this SSE server — it needs the engine running
     carla_script = str(CARLA_FRONTEND_DIR / "carla.py")
     _carla_log_file = open("/tmp/carla-mcp.log", "w")
-    _carla_process = subprocess.Popen(
+    _carla_process = _spawn_child(
         ["pw-jack", "/usr/bin/python3", carla_script],
+        _carla_log_file,
         env=env,
         cwd=str(CARLA_FRONTEND_DIR),
-        stdout=_carla_log_file,
-        stderr=_carla_log_file,
     )
 
     # Wait for MCP to become reachable
@@ -289,11 +306,8 @@ async def _start_looper() -> str:
     # the bridge/rig graph is the only writer of connections (no self-wiring,
     # no MIDI auto-connect, no a2jmidid autostart in the engine).
     _looper_engine_log_file = open("/tmp/looper-engine.log", "w")
-    _looper_engine_process = subprocess.Popen(
-        ["pw-jack", LOOPERS_PATH, "--managed"],
-        env=env,
-        stdout=_looper_engine_log_file,
-        stderr=_looper_engine_log_file,
+    _looper_engine_process = _spawn_child(
+        ["pw-jack", LOOPERS_PATH, "--managed"], _looper_engine_log_file, env=env
     )
 
     # Poll for JACK ports to appear (1s interval, 10s timeout)
@@ -324,12 +338,11 @@ async def _start_looper() -> str:
 
     # Step 2: Launch the looper MCP server
     _looper_log_file = open("/tmp/looper-mcp.log", "w")
-    _looper_process = subprocess.Popen(
+    _looper_process = _spawn_child(
         ["uv", "run", "python3", str(LOOPER_MCP_SCRIPT)],
+        _looper_log_file,
         env=env,
         cwd=str(CARLA_FRONTEND_DIR),
-        stdout=_looper_log_file,
-        stderr=_looper_log_file,
     )
 
     # Wait for MCP to become reachable
@@ -424,11 +437,7 @@ def _start_a2j() -> str | None:
         return None
     try:
         _a2j_log_file = open("/tmp/a2jmidid.log", "w")
-        _a2j_process = subprocess.Popen(
-            ["a2jmidid", "-e"],
-            stdout=_a2j_log_file,
-            stderr=_a2j_log_file,
-        )
+        _a2j_process = _spawn_child(["a2jmidid", "-e"], _a2j_log_file)
     except FileNotFoundError:
         return "a2jmidid not installed"
     except Exception as e:  # noqa: BLE001 — report, don't raise into tool
