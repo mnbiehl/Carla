@@ -99,3 +99,37 @@ def test_start_rig_uses_discovered_ports(
     connect_args = [c.args for c in mock_connect.call_args_list]
     for src, dst in connect_args:
         assert "Test_Interface" in src or "Test_Interface" in dst
+
+
+@patch("carla_mcp.utils.pw_link.pw_link_verify", return_value=True)
+@patch(
+    "carla_mcp.utils.pw_link.pw_link_connect",
+    return_value=PwLinkResult(success=True, message="already linked"),
+)
+@patch("carla_mcp.utils.pw_link.find_capture_input_ports", return_value=_TEST_CAPTURES)
+@patch("carla_mcp.utils.pw_link.find_monitor_output_ports", return_value=_TEST_MONITORS)
+@patch("carla_mcp.mcp_stdio_bridge._start_looper", new_callable=AsyncMock, return_value="ok")
+@patch("carla_mcp.mcp_stdio_bridge._start_carla", new_callable=AsyncMock, return_value="ok")
+def test_start_rig_reports_existing_links_as_ok(
+    mock_carla, mock_looper, mock_find_mon, mock_find_cap, mock_connect, mock_verify
+):
+    """Carla often links itself to the interface first; that is not a failure."""
+    from carla_mcp.mcp_stdio_bridge import _start_rig
+
+    result = asyncio.run(_start_rig())
+    assert "FAIL" not in result
+    assert result.count("OK (already linked)") == 4
+    assert "[Verify] 4/4 connections verified" in result
+
+
+def test_terminate_kills_a_process_that_ignores_sigterm():
+    import subprocess
+    from unittest.mock import MagicMock
+
+    from carla_mcp.mcp_stdio_bridge import _terminate
+
+    proc = MagicMock()
+    proc.wait.side_effect = [subprocess.TimeoutExpired("carla", 5), 0]
+    asyncio.run(_terminate(proc))
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()

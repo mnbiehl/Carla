@@ -131,6 +131,25 @@ def _spawn_child(argv: list[str], log, **kwargs) -> subprocess.Popen:
     )
 
 
+# Readiness polls: short steps so a unit that comes up fast is noticed fast.
+_POLL_S = 0.25
+
+
+def _polls(seconds: float) -> range:
+    """Poll iterations that add up to *seconds* at _POLL_S each."""
+    return range(int(seconds / _POLL_S))
+
+
+async def _terminate(proc: subprocess.Popen, timeout: float = 5) -> None:
+    """SIGTERM *proc*, SIGKILL it if it outlives *timeout*; waits off the event loop."""
+    proc.terminate()
+    try:
+        await asyncio.to_thread(proc.wait, timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        await asyncio.to_thread(proc.wait)
+
+
 def _is_carla_running() -> bool:
     """Check if our managed Carla process is running."""
     global _carla_process
@@ -175,15 +194,15 @@ async def _start_carla() -> str:
     )
 
     # Wait for MCP to become reachable
-    for i in range(15):
-        await asyncio.sleep(1)
+    for i in _polls(15):
+        await asyncio.sleep(_POLL_S)
         if _is_carla_reachable():
             # Carla may accept connections before tools are registered; retry briefly
-            for _ in range(5):
+            for _ in _polls(5):
                 count = await discover_and_register(bridge, CARLA_SSE_URL, prefix="carla")
                 if count > 0:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(_POLL_S)
             return f"Carla started (PID {_carla_process.pid}). MCP server ready on port {CARLA_PORT}. {count} tools registered."
         if _carla_process.poll() is not None:
             return f"Carla process exited with code {_carla_process.returncode}. Check logs."
@@ -200,12 +219,7 @@ async def _stop_carla() -> str:
         return "No managed Carla process to stop."
 
     unregister_all(bridge, prefix="carla")
-    _carla_process.terminate()
-    try:
-        _carla_process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _carla_process.kill()
-        _carla_process.wait()
+    await _terminate(_carla_process)
 
     pid = _carla_process.pid
     _carla_process = None
@@ -310,19 +324,18 @@ async def _start_looper() -> str:
         ["pw-jack", LOOPERS_PATH, "--managed"], _looper_engine_log_file, env=env
     )
 
-    # Poll for JACK ports to appear (1s interval, 10s timeout)
+    # Poll for JACK ports to appear (10s timeout)
     engine_ready = False
-    for _ in range(10):
-        await asyncio.sleep(1)
+    for _ in _polls(10):
+        await asyncio.sleep(_POLL_S)
         if _looper_engine_process.poll() is not None:
             return (
                 f"Looper engine exited with code {_looper_engine_process.returncode}. "
                 "Check /tmp/looper-engine.log."
             )
         try:
-            result = subprocess.run(
-                ["pw-link", "-o"],
-                capture_output=True, text=True, timeout=3,
+            result = await asyncio.to_thread(
+                subprocess.run, ["pw-link", "-o"], capture_output=True, text=True, timeout=3
             )
             if "loopers" in result.stdout or "looperdooper" in result.stdout:
                 engine_ready = True
@@ -346,14 +359,14 @@ async def _start_looper() -> str:
     )
 
     # Wait for MCP to become reachable
-    for i in range(15):
-        await asyncio.sleep(1)
+    for i in _polls(15):
+        await asyncio.sleep(_POLL_S)
         if _is_looper_reachable():
-            for _ in range(5):
+            for _ in _polls(5):
                 count = await discover_and_register(bridge, LOOPER_SSE_URL, prefix="looper")
                 if count > 0:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(_POLL_S)
             return (
                 f"Looper engine (PID {_looper_engine_process.pid}) and "
                 f"MCP server (PID {_looper_process.pid}) ready on port {LOOPER_MCP_PORT}. "
@@ -378,12 +391,7 @@ async def _stop_looper() -> str:
     # Stop MCP server first
     if _looper_process is not None and _looper_process.poll() is None:
         unregister_all(bridge, prefix="looper")
-        _looper_process.terminate()
-        try:
-            _looper_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _looper_process.kill()
-            _looper_process.wait()
+        await _terminate(_looper_process)
         messages.append(f"Looper MCP stopped (PID {_looper_process.pid}).")
         _looper_process = None
     else:
@@ -396,12 +404,7 @@ async def _stop_looper() -> str:
 
     # Then stop the engine
     if _looper_engine_process is not None and _looper_engine_process.poll() is None:
-        _looper_engine_process.terminate()
-        try:
-            _looper_engine_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _looper_engine_process.kill()
-            _looper_engine_process.wait()
+        await _terminate(_looper_engine_process)
         messages.append(f"Looper engine stopped (PID {_looper_engine_process.pid}).")
         _looper_engine_process = None
     else:
@@ -792,24 +795,14 @@ async def get_rig_status() -> str:
     return f"=== Carla ===\n{carla_msg}\n\n=== Looper ===\n{looper_msg}"
 
 
-async def _start_rig() -> str:
-    """Start the full rig (internal helper)."""
-    messages = []
-
-    # Step 1: Start Carla (bridge engine + carla-control viewer)
-    carla_msg = await _start_carla()
-    messages.append(f"[Carla] {carla_msg}")
-
-    # Step 2: Start Looper (engine + MCP server)
-    looper_msg = await _start_looper()
-    messages.append(f"[Looper] {looper_msg}")
-
-    # Step 3: Create external pw-link connections using auto-discovery
+def _wire_main_carla() -> list[str]:
+    """Link the first two interface captures/monitors to main Carla; report lines."""
     from carla_mcp.utils.pw_link import (
         pw_link_connect, pw_link_verify,
         find_monitor_output_ports, find_capture_input_ports,
     )
 
+    messages = []
     captures = find_capture_input_ports()
     monitors = find_monitor_output_ports()
 
@@ -829,13 +822,34 @@ async def _start_rig() -> str:
     conn_results = []
     for src, dst in external_connections:
         result = pw_link_connect(src, dst)
-        status = "OK" if result.success else f"FAIL: {result.message}"
+        if not result.success:
+            status = f"FAIL: {result.message}"
+        elif result.message:
+            status = f"OK ({result.message})"
+        else:
+            status = "OK"
         conn_results.append(f"  {src} -> {dst}: {status}")
     messages.append("[Connections]\n" + "\n".join(conn_results))
 
-    # Step 4: Verify connections
     verified = sum(1 for src, dst in external_connections if pw_link_verify(src, dst))
     messages.append(f"[Verify] {verified}/{len(external_connections)} connections verified")
+    return messages
+
+
+async def _start_rig() -> str:
+    """Start the full rig (internal helper)."""
+    messages = []
+
+    # Step 1: Start Carla (bridge engine + carla-control viewer)
+    carla_msg = await _start_carla()
+    messages.append(f"[Carla] {carla_msg}")
+
+    # Step 2: Start Looper (engine + MCP server)
+    looper_msg = await _start_looper()
+    messages.append(f"[Looper] {looper_msg}")
+
+    # Step 3: Wire interface <-> main Carla (pw-link calls; off the event loop)
+    messages.extend(await asyncio.to_thread(_wire_main_carla))
 
     return "\n\n".join(messages)
 
