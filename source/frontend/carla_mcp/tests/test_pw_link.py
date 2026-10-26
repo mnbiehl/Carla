@@ -95,21 +95,35 @@ def test_list_inputs_parses_pw_link_output(mock_run):
 
 @patch("carla_mcp.utils.pw_link.subprocess.run")
 def test_verify_connection_exists(mock_run):
-    """Parse indented pw-link -l output to verify a connection."""
-    # pw-link -l shows source ports flush-left, connected destinations indented
+    """Parse real `pw-link -l` output: links are `|->` lines under their output port."""
     mock_run.return_value = MagicMock(
         returncode=0,
         stdout=(
             "Carla:audio-out1\n"
-            "   Scarlett:playback_FL\n"
+            "  |-> Scarlett:playback_FL\n"
             "Carla:audio-out2\n"
-            "   Scarlett:playback_FR\n"
+            "  |-> Scarlett:playback_FR\n"
+            "Scarlett:playback_FL\n"
+            "  |<- Carla:audio-out1\n"
         ),
         stderr="",
     )
     assert pw_link_verify("Carla:audio-out1", "Scarlett:playback_FL") is True
     assert pw_link_verify("Carla:audio-out1", "Scarlett:playback_FR") is False
     assert pw_link_verify("Carla:audio-out2", "Scarlett:playback_FR") is True
+    # An input port's `|<-` line is not a link out of that port.
+    assert pw_link_verify("Scarlett:playback_FL", "Carla:audio-out1") is False
+
+
+@patch("carla_mcp.utils.pw_link.subprocess.run")
+def test_connect_already_linked_is_success(mock_run):
+    """pw-link refuses a link that already exists; the wanted state holds, so it succeeds."""
+    mock_run.return_value = MagicMock(
+        returncode=1, stdout="", stderr="failed to link ports: File exists"
+    )
+    result = pw_link_connect("Carla:audio-out1", "Scarlett:playback_FL")
+    assert result.success is True
+    assert "already" in result.message
 
 
 @patch("carla_mcp.utils.pw_link.subprocess.run")

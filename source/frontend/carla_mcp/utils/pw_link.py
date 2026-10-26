@@ -26,6 +26,9 @@ def pw_link_connect(source: str, destination: str) -> PwLinkResult:
         if result.returncode == 0:
             logger.info("Connected %s -> %s", source, destination)
             return PwLinkResult(success=True)
+        elif "File exists" in result.stderr:
+            # The link is already there, which is the state the caller wants.
+            return PwLinkResult(success=True, message="already linked")
         else:
             logger.error(
                 "Failed to connect %s -> %s: %s", source, destination, result.stderr
@@ -108,8 +111,8 @@ def pw_link_list_inputs() -> list[str]:
 def pw_link_verify(source: str, destination: str) -> bool:
     """Verify a connection exists between two ports via pw-link -l.
 
-    Parses pw-link -l output where source ports appear on non-indented lines
-    and connected destinations appear on indented lines below them.
+    pw-link -l prints each port flush-left, then one indented line per link:
+    ``|-> <input>`` under an output port, ``|<- <output>`` under an input port.
     """
     try:
         result = subprocess.run(
@@ -125,8 +128,9 @@ def pw_link_verify(source: str, destination: str) -> bool:
         for line in result.stdout.splitlines():
             if not line.startswith((" ", "\t")):
                 current_source = line.strip()
-            else:
-                if current_source == source and line.strip() == destination:
+            elif current_source == source:
+                link = line.strip()
+                if link.startswith("|->") and link[3:].strip() == destination:
                     return True
         return False
     except (subprocess.TimeoutExpired, FileNotFoundError):
